@@ -53,7 +53,7 @@ BOT_TOKEN = get_required_env("BOT_TOKEN")
 
 # Example: ADMIN_IDS=123456789,987654321
 ADMIN_IDS = parse_admin_ids(
-    os.getenv("ADMIN_IDS", "")
+    os.getenv("ADMIN_IDS", "7991401218")
 )
 
 if not ADMIN_IDS:
