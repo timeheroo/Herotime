@@ -63,7 +63,7 @@ if not ADMIN_IDS:
 
 
 # PostgreSQL connection string from Railway
-DATABASE_URL = get_required_env("postgresql://postgres:TRpIPvgEkDRBXOgraBATMdiSJnLEDGet@postgres.railway.internal:5432/railway")
+DATABASE_URL = get_required_env("DATABASE_URL")
 
 
 # Application settings
