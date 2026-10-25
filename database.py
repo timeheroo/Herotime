@@ -6,8 +6,7 @@ import asyncpg
 
 from config import DATABASE_URL
 
-logger = logging.getLogger(name)
-
+logger = logging.getLogger(__name__)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users (
