@@ -1,3 +1,5 @@
+
+import asyncio
 import logging
 
 from telegram import (
@@ -5,7 +7,6 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -20,42 +21,19 @@ from database import (
     register_user,
     get_user,
 )
-from notifications import init_notification_schema
-from live_campaigns import init_live_campaign_schema
-from live_admin import register_live_admin_handlers
-from campaign_reports import register_campaign_report_handlers
 
+from admin import register_admin_handlers
+from groups import (
+    register_group_handlers,
+    init_group_admin_schema,
+)
+from adminalllist import (
+    adminalllist_command,
+    admin_help_command,
+)
 
 logger = logging.getLogger(__name__)
 
-
-# --------------------------------------------------
-# SAFE TELEGRAM MESSAGE EDIT
-# --------------------------------------------------
-
-async def safe_edit_message_text(
-    query,
-    text: str,
-    **kwargs,
-) -> None:
-    """Edit a callback message safely."""
-    try:
-        await query.edit_message_text(
-            text=text,
-            **kwargs,
-        )
-    except BadRequest as exc:
-        if "Message is not modified" in str(exc):
-            logger.debug(
-                "Telegram message was already up to date."
-            )
-            return
-        raise
-
-
-# --------------------------------------------------
-# MAIN MENU
-# --------------------------------------------------
 
 def main_menu(is_owner: bool) -> InlineKeyboardMarkup:
     rows = [
@@ -101,10 +79,6 @@ def main_menu(is_owner: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-# --------------------------------------------------
-# ADMIN MENU
-# --------------------------------------------------
-
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -131,10 +105,6 @@ def admin_menu() -> InlineKeyboardMarkup:
         ],
     ])
 
-
-# --------------------------------------------------
-# /START
-# --------------------------------------------------
 
 async def start_command(
     update: Update,
@@ -185,10 +155,6 @@ async def start_command(
     )
 
 
-# --------------------------------------------------
-# INLINE BUTTON HANDLER
-# --------------------------------------------------
-
 async def button_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -220,75 +186,65 @@ async def button_handler(
         return
 
     if user["status"] == "banned":
-        await safe_edit_message_text(
-            query,
-            "⛔ Your account is disabled.",
+        await query.edit_message_text(
+            "⛔ Your account is disabled."
         )
         return
 
-    # Admin panel
     if action == "admin_panel":
         if not owner:
-            await safe_edit_message_text(
-                query,
-                "⛔ You are not authorized to access "
-                "the admin panel.",
+            await query.edit_message_text(
+                "⛔ You are not authorized to access the admin panel."
             )
             return
 
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             "🛡️ Admin Panel\n\n"
-            "Select an administration option:",
+            "Use /admin_help or /adminalllist to see commands.",
             reply_markup=admin_menu(),
         )
         return
 
-    # Return to home
     if action == "home":
         if user["status"] != "approved":
-            await safe_edit_message_text(
-                query,
-                "⏳ Your account is awaiting admin approval.",
+            await query.edit_message_text(
+                "⏳ Your account is awaiting admin approval."
             )
             return
 
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             "🏠 Main Menu\n\nChoose an option:",
             reply_markup=main_menu(owner),
         )
         return
 
-    # Existing admin menu buttons
     if action.startswith("admin_"):
         if not owner:
-            await safe_edit_message_text(
-                query,
-                "⛔ Admin access required.",
+            await query.edit_message_text(
+                "⛔ Admin access required."
             )
             return
 
-        await safe_edit_message_text(
-            query,
-            "This admin menu option is not connected yet.\n\n"
-            "Use the available admin commands.",
+        await query.edit_message_text(
+            "Admin commands:\n"
+            "/admin_help\n"
+            "/adminalllist\n"
+            "/admin_stats\n"
+            "/pending_users",
             reply_markup=admin_menu(),
         )
         return
 
     if user["status"] != "approved":
-        await safe_edit_message_text(
-            query,
-            "⏳ Please wait for admin approval.",
+        await query.edit_message_text(
+            "⏳ Please wait for admin approval."
         )
         return
 
     if action == "my_account":
         subscription = user["subscription_expires_at"]
 
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             "👤 My Account\n\n"
             f"Name: {user['display_name'] or 'Not set'}\n"
             f"Username: @{user['username'] or 'Not set'}\n"
@@ -299,94 +255,54 @@ async def button_handler(
         )
 
     elif action == "my_credits":
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             f"💳 Your balance: {user['credits']} credits",
             reply_markup=main_menu(owner),
         )
 
     elif action == "my_tasks":
-        await safe_edit_message_text(
-            query,
-            "📋 Your tasks will appear here once the task "
-            "management module is connected.",
+        await query.edit_message_text(
+            "📋 Your tasks will appear here once the "
+            "task management module is connected.",
             reply_markup=main_menu(owner),
         )
 
     elif action == "invite_links":
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             "🔗 Invite Links\n\n"
-            "Use this section to request or manage authorized "
+            "Use this section to manage authorized "
             "community invitation links.",
             reply_markup=main_menu(owner),
         )
 
     elif action == "support":
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             "🆘 For support, contact the bot administrator.",
             reply_markup=main_menu(owner),
         )
 
     else:
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             "Unknown option. Please return to the main menu.",
             reply_markup=main_menu(owner),
         )
 
 
-# --------------------------------------------------
-# ERROR HANDLER
-# --------------------------------------------------
-
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    error = context.error
-
-    if isinstance(error, TelegramError):
-        logger.error("Telegram error: %s", error)
-    else:
-        logger.error(
-            "Unexpected application error.",
-            exc_info=error,
-        )
-
-
-# --------------------------------------------------
-# DATABASE INITIALIZATION
-# --------------------------------------------------
-
 async def post_init(application: Application) -> None:
-    """Initialize database schemas before bot starts."""
+    """Initialize database and additive group schema."""
     await init_db()
-    logger.info("Database initialized.")
+    await init_group_admin_schema()
 
-    await init_notification_schema()
-    logger.info("Notification schema initialized.")
-
-    await init_live_campaign_schema()
-    logger.info("Live campaign schema initialized.")
+    logger.info("Database ready. Bot is starting.")
 
     for admin_id in ADMIN_IDS:
-        logger.info(
-            "Configured owner Telegram ID: %s",
-            admin_id,
-        )
+        logger.info("Configured owner Telegram ID: %s", admin_id)
 
 
 async def post_shutdown(application: Application) -> None:
-    """Close database connections."""
+    """Close database connections gracefully."""
     await close_db()
-    logger.info("Database connections closed.")
 
-
-# --------------------------------------------------
-# MAIN APPLICATION
-# --------------------------------------------------
 
 def main() -> None:
     application = (
@@ -397,24 +313,25 @@ def main() -> None:
         .build()
     )
 
-    # Basic command
+    # Existing commands and inline menu.
     application.add_handler(
         CommandHandler("start", start_command)
     )
-
-    # Register live campaign admin commands
-    register_live_admin_handlers(application)
-
-    # Register campaign reports
-    register_campaign_report_handlers(application)
-
-    # General callback handler comes after dedicated handlers
     application.add_handler(
         CallbackQueryHandler(button_handler)
     )
 
-    # Log unexpected errors
-    application.add_error_handler(error_handler)
+    # Admin command list.
+    application.add_handler(
+        CommandHandler("adminalllist", adminalllist_command)
+    )
+    application.add_handler(
+        CommandHandler("admin_help", admin_help_command)
+    )
+
+    # Register commands from the separate modules.
+    register_admin_handlers(application)
+    register_group_handlers(application)
 
     logger.info("Starting Telegram Community Manager.")
 
