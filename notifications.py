@@ -5,7 +5,7 @@ from telegram.error import TelegramError
 from config import ADMIN_IDS
 from database import get_pool
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 
 async def init_notification_schema() -> None:
