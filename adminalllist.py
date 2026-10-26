@@ -1,123 +1,102 @@
-"""
-Admin command directory for Telegram Community Manager Bot.
-
-This file implements /adminalllist and /admin_help only.
-It documents the planned command set; commands listed here are NOT automatically
-implemented by this file. Their handlers must be implemented and registered in
-their respective modules.
-
-Compatible with python-telegram-bot v21+.
-"""
 
 from telegram import Update
-from telegram.ext import ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-try:
-    from config import is_admin
-except ImportError:
-    def is_admin(user_id: int) -> bool:
-        # Safe default: deny access if config.is_admin is unavailable.
-        return False
+from config import is_admin
 
 
 COMMAND_SECTIONS = [
     (
-        "👑 GENERAL ADMIN",
+        "🛡️ GENERAL ADMIN",
         [
-            ("/admin", "Admin panel open kare"),
-            ("/adminalllist", "Saari admin commands aur unka kaam dikhaye"),
-            ("/admin_help", "Admin command help dikhaye"),
-            ("/admin_stats", "Bot ke overall statistics dikhaye"),
-            ("/bot_status", "Bot status check kare"),
+            ("/admin", "Admin panel"),
+            ("/adminalllist", "Admin command directory"),
+            ("/admin_help", "Command help"),
+            ("/admin_stats", "User statistics"),
+            ("/audit_logs", "Admin activity logs"),
         ],
     ),
     (
         "👥 USER MANAGEMENT",
         [
-            ("/pending_users", "Approval ka intezar kar rahe users dikhaye"),
-            ("/approved_users", "Approved users ki list dikhaye"),
-            ("/approve_user USER_ID", "User ko approve kare"),
-            ("/ban_user USER_ID", "User ko ban kare"),
-            ("/unban_user USER_ID", "User ka ban hataye"),
-            ("/user_info USER_ID", "User ki details dikhaye"),
-        ],
-    ),
-    (
-        "📢 CHANNEL / GROUP MANAGEMENT",
-        [
-            ("/add_group", "Naya channel/group add karne ka flow"),
-            ("/list_groups", "Saved channels/groups ki list"),
-            ("/search_group @username", "Username se channel/group search kare"),
-            ("/group_info @username", "Saved channel/group details dikhaye"),
-            ("/update_invite @username LINK", "Saved invite link update kare"),
-            ("/remove_group @username", "Saved channel/group entry remove kare"),
-            ("/pause_group @username", "Us group ki service pause kare"),
-            ("/resume_group @username", "Us group ki service resume kare"),
-        ],
-    ),
-    (
-        "⚙️ SERVICE & QUANTITY",
-        [
-            ("/set_quantity @username NUMBER", "Configured target quantity set kare"),
-            ("/increase_quantity @username NUMBER", "Configured quantity badhaye"),
-            ("/decrease_quantity @username NUMBER", "Configured quantity ghataye"),
-            ("/start_service @username", "Service enable kare"),
-            ("/stop_service @username", "Service disable kare"),
-            ("/live_status @username", "Saved service/stream status dikhaye"),
-            ("/all_services", "Sabhi saved services ka status dikhaye"),
-            ("/campaign_report", "Campaign settings aur available records dikhaye"),
-        ],
-    ),
-    (
-        "🔑 API & ACCOUNT MANAGEMENT",
-        [
-            ("/api_accounts", "Saved API account entries dikhaye"),
-            ("/add_api", "API ID/API Hash entry add karne ka flow"),
-            ("/api_info ACCOUNT_NAME", "Account entry ki non-secret details dikhaye"),
-            ("/rename_account OLD_NAME NEW_NAME", "Bot ke andar custom account label badle"),
-            ("/update_api ACCOUNT_NAME", "Saved API credentials update kare"),
-            ("/remove_api ACCOUNT_NAME", "Saved API entry remove kare"),
-            ("/connect_account ACCOUNT_NAME", "Authorized account authentication flow"),
-            ("/disconnect_account ACCOUNT_NAME", "Account session disconnect/revoke flow"),
-            ("/account_status ACCOUNT_NAME", "Account connection status dikhaye"),
-            ("/rename_profile ACCOUNT_NAME", "Authorized Telegram profile-name update flow"),
+            ("/pending_users", "Pending users list"),
+            ("/approved_users", "Approved users list"),
+            ("/approve_user TELEGRAM_ID", "Approve a user"),
+            ("/ban_user TELEGRAM_ID", "Ban a user"),
+            ("/unban_user TELEGRAM_ID", "Unban a user"),
+            ("/user_info TELEGRAM_ID", "User details"),
         ],
     ),
     (
         "💳 CREDITS",
         [
-            ("/add_credit USER_ID AMOUNT", "User credits add kare"),
-            ("/deduct_credit USER_ID AMOUNT", "User credits deduct kare"),
-            ("/credit_balance USER_ID", "User ka current balance dikhaye"),
-            ("/credit_history USER_ID", "User ki transaction history dikhaye"),
+            ("/add_credit TELEGRAM_ID AMOUNT REASON", "Add credits"),
+            ("/deduct_credit TELEGRAM_ID AMOUNT REASON", "Deduct credits"),
+            ("/credit_balance TELEGRAM_ID", "Check balance"),
+            ("/credit_history TELEGRAM_ID", "Transaction history"),
         ],
     ),
     (
-        "📊 REPORTS",
+        "📢 GROUPS AND CHANNELS",
         [
-            ("/daily_report", "Aaj ka report"),
-            ("/weekly_report", "Pichhle 7 din ka report"),
-            ("/monthly_report", "Is mahine ka report"),
-            ("/last24h", "Pichhle 24 ghante ka report"),
-            ("/last72h", "Pichhle 72 ghante ka report"),
-            ("/channel_report @username", "Ek channel ka report"),
-            ("/stream_duration @username", "Available records se stream duration"),
-            ("/quantity_report @username", "Configured quantity aur available count"),
-            ("/spend_report", "Recorded spending report"),
-            ("/export_report", "Report export flow, agar implement ho"),
+            ("/add_group @USERNAME source", "Register a source group"),
+            ("/add_group @USERNAME target", "Register a target group"),
+            ("/groups", "List registered groups"),
+            ("/all_channels", "List registered channels"),
+            ("/list_groups", "Alternative group list command"),
+            ("/search_group KEYWORD", "Search groups"),
+            ("/group_info GROUP_ID", "Group details"),
+            ("/update_invite GROUP_ID URL", "Update invite link"),
+            ("/remove_group GROUP_ID", "Remove a group"),
+            ("/pause_group GROUP_ID", "Pause group service"),
+            ("/resume_group GROUP_ID", "Resume group service"),
         ],
     ),
     (
-        "📋 TASKS, NOTIFICATIONS & SECURITY",
+        "⚙️ QUANTITY AND SERVICE",
         [
-            ("/tasks", "Task list"),
-            ("/task_info TASK_ID", "Task details"),
-            ("/pause_task TASK_ID", "Task pause kare"),
-            ("/resume_task TASK_ID", "Task resume kare"),
-            ("/cancel_task TASK_ID", "Task cancel kare"),
-            ("/announce", "Announcement bhejne ka flow"),
-            ("/audit_logs", "Admin activity history"),
-            ("/database_status", "Database connection status"),
+            ("/set_quantity GROUP_ID QUANTITY", "Set target quantity"),
+            ("/increase_quantity GROUP_ID AMOUNT", "Increase quantity"),
+            ("/decrease_quantity GROUP_ID AMOUNT", "Decrease quantity"),
+            ("/start_service GROUP_ID", "Enable service"),
+            ("/stop_service GROUP_ID", "Disable service"),
+            ("/live_status GROUP_ID", "Show saved service settings"),
+            ("/all_services", "List service settings"),
+            ("/campaign_report", "Report for all groups"),
+            ("/campaign_report GROUP_ID", "Report for one group"),
+        ],
+    ),
+    (
+        "🔑 API ACCOUNT MANAGEMENT",
+        [
+            ("/add_api NAME API_ID API_HASH", "Save API account details"),
+            ("/api_accounts", "List saved API accounts"),
+            ("/remove_api NAME", "Remove saved API account details"),
+        ],
+    ),
+    (
+        "ℹ️ IMPORTANT NOTES",
+        [
+            (
+                "GROUP_ID",
+                "Use the internal database group ID, not the Telegram -100 chat ID.",
+            ),
+            (
+                "TARGET GROUP",
+                "Quantity commands require a group registered with type target.",
+            ),
+            (
+                "SERVICE STATUS",
+                "Starting service updates saved settings; it does not itself guarantee campaign execution.",
+            ),
+            (
+                "REPORTS",
+                "Reports show stored settings and recorded events, not actual viewers or spend.",
+            ),
+            (
+                "API SECURITY",
+                "Never share API hashes, bot tokens, passwords, OTPs, or session secrets in chat.",
+            ),
         ],
     ),
 ]
@@ -127,58 +106,75 @@ def _format_command_list() -> str:
     parts = [
         "🛡️ ADMIN CONTROL PANEL — COMMAND DIRECTORY",
         "",
-        "Yeh command directory hai. Kisi command ka listed hona yeh guarantee nahi "
-        "karta ki uska handler abhi project mein implemented hai.",
+        "Commands are listed by module. A command works only when its "
+        "handler is registered and its dependencies are configured.",
         "",
     ]
+
     for section, commands in COMMAND_SECTIONS:
         parts.append(section)
+
         for command, description in commands:
             parts.append(f"{command} — {description}")
+
         parts.append("")
-    parts.extend([
-        "⚠️ IMPORTANT",
-        "• Quantity setting configured target hai; actual viewer count ki guarantee nahi.",
-        "• Actual viewers/stream duration sirf reliable data source milne par report honge.",
-        "• API ID/API Hash se akela account login nahi hota; authorized authentication/session chahiye.",
-        "• API Hash, OTP, password ya session secrets ko chat/logs mein share na karein.",
-    ])
+
     return "\n".join(parts)
 
 
 async def adminalllist_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     user = update.effective_user
     message = update.effective_message
-    if not user or not message:
-        return
-    if not is_admin(user.id):
-        await message.reply_text("⛔ Access denied. Yeh command sirf admin ke liye hai.")
+
+    if user is None or message is None:
         return
 
-    text = _format_command_list()
-    # Telegram message limit is 4096 characters. Split at line boundaries.
+    if not is_admin(user.id):
+        await message.reply_text(
+            "⛔ Access denied. Yeh command sirf admin ke liye hai."
+        )
+        return
+
+    output = _format_command_list()
     chunks = []
     current = ""
-    for line in text.splitlines():
+
+    for line in output.splitlines():
         candidate = f"{current}\n{line}" if current else line
-        if len(candidate) > 3800:
+
+        if len(candidate) > 3500:
             if current:
                 chunks.append(current)
             current = line
         else:
             current = candidate
+
     if current:
         chunks.append(current)
 
     total = len(chunks)
+
     for index, chunk in enumerate(chunks, start=1):
         header = f"📄 Part {index}/{total}\n\n" if total > 1 else ""
         await message.reply_text(header + chunk)
 
 
 async def admin_help_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     await adminalllist_command(update, context)
+
+
+def register_adminalllist_handlers(
+    application: Application,
+) -> None:
+    application.add_handler(
+        CommandHandler("adminalllist", adminalllist_command)
+    )
+    application.add_handler(
+        CommandHandler("admin_help", admin_help_command)
+    )
