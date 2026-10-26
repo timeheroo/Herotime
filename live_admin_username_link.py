@@ -456,3 +456,131 @@ def register_live_admin_handlers(application: Application) -> None:
 
     for command, callback in handlers:
         application.add_handler(CommandHandler(command, callback))
+
+async def set_quantity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _admin_only(update):
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    if len(context.args) != 2:
+        await message.reply_text(
+            "Usage: /set_quantity @username QUANTITY\n"
+            "Example: /set_quantity @yourchannel 100"
+        )
+        return
+
+    # Quantity ko alag validate karein.
+    try:
+        quantity = int(context.args[1])
+        if not 1 <= quantity <= MAX_QUANTITY:
+            raise ValueError
+    except (ValueError, TypeError):
+        await message.reply_text(
+            f"❌ Quantity 1 se {MAX_QUANTITY} ke beech whole number honi chahiye."
+        )
+        return
+
+    try:
+        group_id, title = await _resolve_from_update(
+            update, context, context.args[0]
+        )
+
+        if group_id is None:
+            await message.reply_text(
+                "❌ Registered channel nahi mila. Pehle /add_group se register karein."
+            )
+            return
+
+        await set_live_quantity(group_id, quantity)
+        await message.reply_text(
+            f"✅ {title}\nTarget quantity {quantity} set ho gayi."
+        )
+
+    except Exception:
+        logger.exception("set_quantity failed")
+        await message.reply_text(
+            "❌ Quantity save nahi hui. Railway logs mein asli error check karein. "
+            "Channel ka group_type 'target' hona chahiye."
+        )
+
+
+async def _change_quantity(update, context, increase: bool):
+    if not await _admin_only(update):
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    command = "increase_quantity" if increase else "decrease_quantity"
+
+    if len(context.args) != 2:
+        await message.reply_text(
+            f"Usage: /{command} @username AMOUNT\n"
+            f"Example: /{command} @yourchannel 10"
+        )
+        return
+
+    try:
+        amount = int(context.args[1])
+        if amount <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        await message.reply_text(
+            "❌ Amount positive whole number hona chahiye. Example: 10"
+        )
+        return
+
+    try:
+        group_id, title = await _resolve_from_update(
+            update, context, context.args[0]
+        )
+
+        if group_id is None:
+            await message.reply_text(
+                "❌ Registered channel nahi mila. Username aur /add_group check karein."
+            )
+            return
+
+        current = await get_live_settings(group_id)
+        if not current:
+            await message.reply_text(
+                "❌ Live settings nahi mili. Pehle /set_quantity chalayein."
+            )
+            return
+
+        old = int(current["target_viewers"])
+        new = old + amount if increase else old - amount
+
+        if not 1 <= new <= MAX_QUANTITY:
+            await message.reply_text(
+                f"❌ Nayi quantity 1 se {MAX_QUANTITY} ke beech honi chahiye."
+            )
+            return
+
+        await set_live_quantity(group_id, new)
+
+        await message.reply_text(
+            f"✅ {title}\n"
+            f"Purani quantity: {old}\n"
+            f"Nayi quantity: {new}\n"
+            f"Quantity {'badha di' if increase else 'ghata di'}."
+        )
+
+    except Exception:
+        logger.exception("%s failed", command)
+        await message.reply_text(
+            "❌ Quantity change nahi hui. Railway logs check karein; "
+            "channel ka group_type 'target' hona chahiye."
+        )
+
+
+async def increase_quantity_command(update, context):
+    await _change_quantity(update, context, True)
+
+
+async def decrease_quantity_command(update, context):
+    await _change_quantity(update, context, False)
