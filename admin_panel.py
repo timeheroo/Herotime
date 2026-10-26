@@ -368,3 +368,170 @@ def register_admin_power_handlers(application: Application):
         admin_power_callback,
         pattern=r"^power:",
     ))
+
+# ===== UNDER ADMIN ADD / REMOVE =====
+
+async def add_under_admin_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user = update.effective_user
+    message = update.effective_message
+
+    if not user or not config.is_admin(user.id):
+        await permission_denied(update)
+        return
+
+    if not context.args:
+        await message.reply_text(
+            "Usage:\n/addnewadmin TELEGRAM_ID\n\n"
+            "User ko pehle bot par /start karna hoga."
+        )
+        return
+
+    try:
+        target_id = int(context.args[0])
+        if target_id <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply_text("❌ Sahi numeric Telegram ID dein.")
+        return
+
+    if target_id in config.ADMIN_IDS:
+        await message.reply_text(
+            "⛔ Configured owner ko Under Admin mein badla nahi ja sakta."
+        )
+        return
+
+    try:
+        async with database.connection() as conn:
+            target = await conn.fetchrow(
+                """
+                SELECT telegram_id, display_name, username, status
+                FROM users
+                WHERE telegram_id = $1
+                """,
+                target_id,
+            )
+
+            if not target:
+                await message.reply_text(
+                    "❌ User database mein nahi mila.\n"
+                    "Pehle us user se bot par /start karwayein."
+                )
+                return
+
+            if target["status"] == "banned":
+                await message.reply_text(
+                    "⛔ Banned user ko Under Admin nahi bana sakte."
+                )
+                return
+
+            await conn.execute(
+                """
+                UPDATE users
+                SET role = 'admin', status = 'approved'
+                WHERE telegram_id = $1
+                """,
+                target_id,
+            )
+
+        await message.reply_text(
+            "✅ Under Admin add ho gaya.\n"
+            f"Telegram ID: {target_id}\n\n"
+            "Security ke liye uski commands default OFF rahengi. "
+            "All Power List se required permissions ON karein."
+        )
+
+    except Exception:
+        logger.exception("Could not add under-admin")
+        await message.reply_text(
+            "❌ Admin add nahi ho saka. Railway logs aur database schema check karein."
+        )
+
+
+async def remove_under_admin_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user = update.effective_user
+    message = update.effective_message
+
+    if not user or not config.is_admin(user.id):
+        await permission_denied(update)
+        return
+
+    if not context.args:
+        await message.reply_text(
+            "Usage:\n/Removeadmin TELEGRAM_ID"
+        )
+        return
+
+    try:
+        target_id = int(context.args[0])
+        if target_id <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply_text("❌ Sahi numeric Telegram ID dein.")
+        return
+
+    if target_id in config.ADMIN_IDS:
+        await message.reply_text(
+            "⛔ Configured owner ko is command se remove nahi kar sakte."
+        )
+        return
+
+    try:
+        async with database.connection() as conn:
+            target = await conn.fetchrow(
+                """
+                SELECT telegram_id, role
+                FROM users
+                WHERE telegram_id = $1
+                """,
+                target_id,
+            )
+
+            if not target:
+                await message.reply_text("❌ User database mein nahi mila.")
+                return
+
+            # Admin role hatayein aur user ko approved normal user rakhein.
+            await conn.execute(
+                """
+                UPDATE users
+                SET role = 'user'
+                WHERE telegram_id = $1
+                """,
+                target_id,
+            )
+
+            # Is user ki saari command permissions OFF/remove karein.
+            await conn.execute(
+                """
+                DELETE FROM admin_command_permissions
+                WHERE admin_telegram_id = $1
+                """,
+                target_id,
+            )
+
+        await message.reply_text(
+            "✅ Under Admin access remove kar diya.\n"
+            f"Telegram ID: {target_id}\n"
+            "User ka account delete nahi hua; sirf admin role aur powers hatayi gayi hain."
+        )
+
+    except Exception:
+        logger.exception("Could not remove under-admin")
+        await message.reply_text(
+            "❌ Admin remove nahi hua. Railway logs check karein."
+        )
+
+
+def register_under_admin_handlers(application: Application):
+    application.add_handler(
+        CommandHandler("addnewadmin", add_under_admin_command)
+    )
+    application.add_handler(
+        CommandHandler("removeadmin", remove_under_admin_command)
+    )
