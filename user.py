@@ -13,7 +13,7 @@ from telegram.ext import (
 
 from database import get_user, get_pool
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 
 
 def user_menu():
