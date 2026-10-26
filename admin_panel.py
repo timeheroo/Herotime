@@ -535,3 +535,199 @@ def register_under_admin_handlers(application: Application):
     application.add_handler(
         CommandHandler("removeadmin", remove_under_admin_command)
     )
+async def add_under_admin_command(update, context):
+    """Add an existing registered user as an under-admin."""
+    user = update.effective_user
+    message = update.effective_message
+
+    if not user or not message:
+        return
+
+    if not config.is_admin(user.id):
+        await message.reply_text("⛔ Sirf Main Admin ye command chala sakta hai.")
+        return
+
+    if not context.args:
+        await message.reply_text(
+            "Usage:\n/addnewadmin TELEGRAM_ID\n\n"
+            "User ko pehle bot par /start karna hoga."
+        )
+        return
+
+    try:
+        target_id = int(context.args[0])
+        if target_id <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply_text("❌ Sahi numeric Telegram ID dein.")
+        return
+
+    if target_id in config.ADMIN_IDS:
+        await message.reply_text(
+            "⚠️ Ye ID pehle se Main Admin hai."
+        )
+        return
+
+    try:
+        async with database.connection() as conn:
+            target = await conn.fetchrow(
+                """
+                SELECT id, telegram_id, display_name, username, status
+                FROM users
+                WHERE telegram_id = $1
+                """,
+                target_id,
+            )
+
+            if not target:
+                await message.reply_text(
+                    "❌ User database mein nahi mila. "
+                    "Pehle us user se bot par /start karwayein."
+                )
+                return
+
+            if target["status"] == "banned":
+                await message.reply_text(
+                    "❌ Banned user ko Under Admin nahi bana sakte."
+                )
+                return
+
+            await conn.execute(
+                """
+                UPDATE users
+                SET role = 'admin', status = 'approved'
+                WHERE telegram_id = $1
+                """,
+                target_id,
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO audit_logs (actor_user_id, action, details)
+                VALUES ($1, $2, $3::jsonb)
+                """,
+                (await conn.fetchval(
+                    "SELECT id FROM users WHERE telegram_id = $1",
+                    user.id,
+                )),
+                "under_admin_added",
+                __import__("json").dumps({
+                    "target_telegram_id": target_id
+                }),
+            )
+
+        await message.reply_text(
+            f"✅ Under Admin add ho gaya.\n"
+            f"Telegram ID: {target_id}\n"
+            f"Name: {target['display_name'] or 'Not set'}\n\n"
+            "⚠️ Iske individual commands default OFF hone chahiye. "
+            "Command permissions alag se configure hongi."
+        )
+
+    except Exception:
+        logger.exception("Failed to add under-admin")
+        await message.reply_text(
+            "❌ Under Admin add nahi hua. Railway logs check karein."
+        )
+
+
+async def remove_under_admin_command(update, context):
+    """Remove an under-admin without deleting the user or their records."""
+    user = update.effective_user
+    message = update.effective_message
+
+    if not user or not message:
+        return
+
+    if not config.is_admin(user.id):
+        await message.reply_text("⛔ Sirf Main Admin ye command chala sakta hai.")
+        return
+
+    if not context.args:
+        await message.reply_text(
+            "Usage:\n/Removeadmin TELEGRAM_ID"
+        )
+        return
+
+    try:
+        target_id = int(context.args[0])
+        if target_id <= 0:
+            raise ValueError
+    except ValueError:
+        await message.reply_text("❌ Sahi numeric Telegram ID dein.")
+        return
+
+    if target_id in config.ADMIN_IDS:
+        await message.reply_text(
+            "⛔ Main Admin ko is command se remove nahi kar sakte."
+        )
+        return
+
+    try:
+        async with database.connection() as conn:
+            async with conn.transaction():
+                target = await conn.fetchrow(
+                    """
+                    SELECT id, telegram_id, role
+                    FROM users
+                    WHERE telegram_id = $1
+                    """,
+                    target_id,
+                )
+
+                if not target or target["role"] != "admin":
+                    await message.reply_text(
+                        "❌ Ye user Under Admin list mein nahi hai."
+                    )
+                    return
+
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET role = 'user'
+                    WHERE telegram_id = $1
+                    """,
+                    target_id,
+                )
+
+                # Permissions remove karein, user/account data nahi.
+                await conn.execute(
+                    """
+                    DELETE FROM admin_command_permissions
+                    WHERE admin_telegram_id = $1
+                    """,
+                    target_id,
+                )
+
+                await conn.execute(
+                    """
+                    INSERT INTO audit_logs (actor_user_id, action, details)
+                    VALUES ($1, $2, $3::jsonb)
+                    """,
+                    target["id"],
+                    "under_admin_removed",
+                    __import__("json").dumps({
+                        "target_telegram_id": target_id
+                    }),
+                )
+
+        await message.reply_text(
+            f"✅ Under Admin access remove ho gaya.\n"
+            f"ID: {target_id}\n"
+            "User ka account aur purane records delete nahi kiye gaye."
+        )
+
+    except Exception:
+        logger.exception("Failed to remove under-admin")
+        await message.reply_text(
+            "❌ Admin access remove nahi hua. Railway logs check karein."
+        )
+
+
+def register_under_admin_handlers(application):
+    application.add_handler(
+        CommandHandler("addnewadmin", add_under_admin_command)
+    )
+    application.add_handler(
+        CommandHandler("Removeadmin", remove_under_admin_command)
+    )
