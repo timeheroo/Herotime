@@ -4,7 +4,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from config import BOT_TOKEN, ADMIN_IDS, is_admin
 from database import init_db, close_db, register_user, get_user
 from groups import init_group_admin_schema, register_group_handlers
-from live_admin_username_link import register_live_admin_handlers
+register_live_admin_handlers(application)
 from live_campaigns import init_live_campaign_schema
 from api_accounts import register_api_handlers
 from notifications import init_notification_schema
