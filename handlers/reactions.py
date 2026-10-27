@@ -1,14 +1,15 @@
 
+import logging
+
 from telegram import Update
-from telegram.ext import (
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import CommandHandler, ContextTypes
 
 from database import get_pool
 from utils.permissions import require_permission
 from utils.logger import log_action
+from handlers.channels import normalize_channel_input
 
+logger = logging.getLogger(__name__)
 
 ALLOWED_REACTIONS = {
     "like",
@@ -21,280 +22,281 @@ ALLOWED_REACTIONS = {
 }
 
 
-async def set_reaction(
+async def _authorized(update: Update) -> bool:
+    user = update.effective_user
+    message = update.effective_message
+
+    if user is None or message is None:
+        return False
+
+    allowed, reason = await require_permission(
+        user.id,
+        "manage_reactions",
+    )
+
+    if not allowed:
+        await message.reply_text(reason)
+        return False
+
+    return True
+
+
+async def _find_channel(conn, identifier: str):
+    username = normalize_channel_input(identifier)
+
+    return await conn.fetchrow(
+        """
+        SELECT id, title, username, is_active
+        FROM channels
+        WHERE LOWER(username) = LOWER($1)
+        LIMIT 1
+        """,
+        username,
+    )
+
+
+async def setreaction(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-):
-    if not update.effective_user or not update.message:
+) -> None:
+    if not await _authorized(update):
         return
 
-    user_id = update.effective_user.id
-
-    allowed, message = await require_permission(
-        user_id, "manage_reactions"
-    )
-    if not allowed:
-        await update.message.reply_text(message)
-        return
+    message = update.effective_message
+    user = update.effective_user
 
     if len(context.args) != 3:
-        await update.message.reply_text(
+        await message.reply_text(
             "Usage:\n"
-            "/setreaction CHANNEL_ID REACTION QUANTITY\n\n"
+            "/setreaction @channel_username REACTION QUANTITY\n\n"
+            "Allowed reactions: like, heart, fire, thumbsup, "
+            "laugh, sad, wow\n\n"
             "Example:\n"
-            "/setreaction 1 heart 100\n\n"
-            "Allowed reactions: "
-            + ", ".join(sorted(ALLOWED_REACTIONS))
+            "/setreaction @examplechannel heart 20"
         )
         return
 
     try:
-        channel_id = int(context.args[0])
-        reaction_type = context.args[1].lower()
+        identifier = context.args[0]
+        reaction = context.args[1].lower()
         quantity = int(context.args[2])
-    except ValueError:
-        await update.message.reply_text(
-            "Channel ID aur quantity number mein honi chahiye."
-        )
-        return
 
-    if reaction_type not in ALLOWED_REACTIONS:
-        await update.message.reply_text(
-            "Invalid reaction type.\nAllowed: "
-            + ", ".join(sorted(ALLOWED_REACTIONS))
-        )
-        return
-
-    if quantity < 0 or quantity > 1_000_000:
-        await update.message.reply_text(
-            "Quantity 0 se 1,000,000 ke beech honi chahiye."
-        )
-        return
-
-    pool = await get_pool()
-
-    async with pool.acquire() as conn:
-        channel = await conn.fetchrow(
-            """
-            SELECT id, title, is_active
-            FROM channels
-            WHERE id = $1
-            """,
-            channel_id,
-        )
-
-        if not channel:
-            await update.message.reply_text(
-                "Channel record nahi mila. /channels check karein."
+        if reaction not in ALLOWED_REACTIONS:
+            await message.reply_text(
+                "Invalid reaction. Allowed: "
+                + ", ".join(sorted(ALLOWED_REACTIONS))
             )
             return
 
-        if not channel["is_active"]:
-            await update.message.reply_text(
-                "Yeh channel inactive hai. Pehle channel activate karein."
-            )
-            return
+        if quantity < 0:
+            raise ValueError("Quantity zero ya usse zyada honi chahiye.")
 
-        task = await conn.fetchrow(
-            """
-            INSERT INTO reaction_tasks
-                (channel_id, reaction_type, target_quantity,
-                 status, created_by)
-            VALUES ($1, $2, $3, 'stopped', $4)
-            RETURNING id
-            """,
-            channel_id,
-            reaction_type,
-            quantity,
-            user_id,
+        pool = await get_pool()
+
+        async with pool.acquire() as conn:
+            channel = await _find_channel(conn, identifier)
+
+            if channel is None:
+                await message.reply_text(
+                    "Channel database mein nahi mila. "
+                    "Pehle /addchannel karein."
+                )
+                return
+
+            if not channel["is_active"]:
+                await message.reply_text(
+                    "Channel inactive hai. Pehle activate karein."
+                )
+                return
+
+            row = await conn.fetchrow(
+                """
+                INSERT INTO reaction_tasks
+                    (channel_id, reaction_type, target_quantity,
+                     status, created_by, created_at, updated_at)
+                VALUES ($1, $2, $3, 'stopped', $4, NOW(), NOW())
+                RETURNING id
+                """,
+                channel["id"],
+                reaction,
+                quantity,
+                user.id,
+            )
+
+        await log_action(
+            user.id,
+            "reaction_task_configured",
+            {
+                "task_id": row["id"],
+                "channel": identifier,
+                "reaction": reaction,
+                "quantity": quantity,
+            },
         )
 
-    await log_action(
-        actor_id=user_id,
-        action="reaction_task_created",
-        details={
-            "task_id": task["id"],
-            "channel_id": channel_id,
-            "reaction_type": reaction_type,
-            "target_quantity": quantity,
-        },
-    )
+        await message.reply_text(
+            "Reaction-task configuration saved.\n"
+            f"Task ID: {row['id']}\n"
+            f"Channel: {channel['title']}\n"
+            f"Reaction type: {reaction}\n"
+            f"Target quantity: {quantity}\n"
+            "Status: STOPPED"
+        )
 
-    await update.message.reply_text(
-        f"Reaction task record create ho gaya.\n\n"
-        f"Task ID: {task['id']}\n"
-        f"Channel: {channel['title']}\n"
-        f"Reaction: {reaction_type}\n"
-        f"Target quantity: {quantity}\n"
-        f"Status: stopped\n\n"
-        "Note: Actual reactions bhejne wala worker connected nahi hai."
-    )
+    except ValueError as exc:
+        await message.reply_text(
+            f"Invalid input: {exc}\n"
+            "Quantity ek non-negative whole number honi chahiye."
+        )
+    except Exception:
+        logger.exception("Failed to configure reaction task")
+        await message.reply_text(
+            "Reaction-task configuration save nahi ho saki."
+        )
 
 
-async def list_reaction_tasks(
+async def reactiontasks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-):
-    if not update.effective_user or not update.message:
+) -> None:
+    if not await _authorized(update):
         return
 
-    allowed, message = await require_permission(
-        update.effective_user.id, "manage_reactions"
-    )
-    if not allowed:
-        await update.message.reply_text(message)
-        return
-
+    message = update.effective_message
     pool = await get_pool()
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT
-                rt.id,
-                rt.reaction_type,
-                rt.target_quantity,
-                rt.status,
-                c.title AS channel_title
-            FROM reaction_tasks rt
-            JOIN channels c ON c.id = rt.channel_id
-            ORDER BY rt.id DESC
-            LIMIT 30
+            SELECT t.id, t.reaction_type, t.target_quantity, t.status,
+                   c.username, c.title
+            FROM reaction_tasks t
+            JOIN channels c ON c.id = t.channel_id
+            ORDER BY t.id DESC
+            LIMIT 50
             """
         )
 
     if not rows:
-        await update.message.reply_text(
-            "Abhi koi reaction task record nahi hai."
+        await message.reply_text(
+            "Abhi koi reaction task configured nahi hai."
         )
         return
 
-    lines = ["Reaction task records:\n"]
+    lines = ["Reaction-task configurations:"]
 
     for row in rows:
-        lines.append(
-            f"ID: {row['id']}\n"
-            f"Channel: {row['channel_title']}\n"
-            f"Reaction: {row['reaction_type']}\n"
-            f"Target: {row['target_quantity']}\n"
-            f"Status: {row['status']}\n"
+        channel_name = (
+            f"@{row['username']}"
+            if row["username"]
+            else row["title"]
         )
 
-    lines.append(
-        "Note: Yeh database task records hain; actual reactions "
-        "worker connected nahi hai."
-    )
+        lines.append(
+            f"\nTask ID: {row['id']}"
+            f"\nChannel: {channel_name}"
+            f"\nReaction: {row['reaction_type']}"
+            f"\nTarget: {row['target_quantity']}"
+            f"\nStatus: {row['status'].upper()}"
+        )
 
-    await update.message.reply_text("\n".join(lines))
+    await message.reply_text("\n".join(lines))
 
 
-async def set_reaction_status(
+async def _set_reaction_status(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    status: str,
-):
-    if not update.effective_user or not update.message:
+    active: bool,
+) -> None:
+    if not await _authorized(update):
         return
 
-    user_id = update.effective_user.id
-
-    allowed, message = await require_permission(
-        user_id, "manage_reactions"
-    )
-    if not allowed:
-        await update.message.reply_text(message)
-        return
+    message = update.effective_message
+    user = update.effective_user
 
     if len(context.args) != 1:
-        command = (
-            "/startreactions TASK_ID"
-            if status == "running"
-            else "/stopreactions TASK_ID"
-        )
-        await update.message.reply_text(
-            f"Usage: {command}"
+        await message.reply_text(
+            "Usage:\n"
+            "/startreactions TASK_ID\n"
+            "/stopreactions TASK_ID"
         )
         return
 
     try:
         task_id = int(context.args[0])
+        if task_id <= 0:
+            raise ValueError
     except ValueError:
-        await update.message.reply_text(
-            "Task ID number mein honi chahiye."
-        )
+        await message.reply_text("Task ID positive number hona chahiye.")
         return
 
+    new_status = "running" if active else "stopped"
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        task = await conn.fetchrow(
+        row = await conn.fetchrow(
             """
-            SELECT rt.id, rt.channel_id, c.is_active
-            FROM reaction_tasks rt
-            JOIN channels c ON c.id = rt.channel_id
-            WHERE rt.id = $1
+            UPDATE reaction_tasks AS t
+            SET status = $1, updated_at = NOW()
+            FROM channels AS c
+            WHERE t.id = $2
+              AND c.id = t.channel_id
+              AND ($3 = FALSE OR c.is_active = TRUE)
+            RETURNING t.id, t.reaction_type, t.target_quantity,
+                      c.title, c.username
             """,
+            new_status,
             task_id,
+            active,
         )
 
-        if not task:
-            await update.message.reply_text(
-                "Reaction task nahi mila. /reactiontasks check karein."
-            )
-            return
-
-        if status == "running" and not task["is_active"]:
-            await update.message.reply_text(
-                "Channel inactive hai. Pehle channel activate karein."
-            )
-            return
-
-        await conn.execute(
-            """
-            UPDATE reaction_tasks
-            SET status = $1
-            WHERE id = $2
-            """,
-            status,
-            task_id,
+    if row is None:
+        await message.reply_text(
+            "Task nahi mila, ya channel inactive hai."
         )
+        return
 
     await log_action(
-        actor_id=user_id,
-        action=f"reaction_task_{status}",
-        details={"task_id": task_id},
+        user.id,
+        "reaction_task_started" if active else "reaction_task_stopped",
+        {"task_id": task_id},
     )
 
-    if status == "running":
-        await update.message.reply_text(
-            f"Task {task_id} ka status running set ho gaya.\n"
-            "Yeh sirf database status hai; actual reactions "
-            "automatically nahi bheje jayenge."
-        )
-    else:
-        await update.message.reply_text(
-            f"Task {task_id} ka status stopped set ho gaya."
-        )
+    channel_name = (
+        f"@{row['username']}"
+        if row["username"]
+        else row["title"]
+    )
+
+    await message.reply_text(
+        f"Task ID: {task_id}\n"
+        f"Channel: {channel_name}\n"
+        f"Reaction: {row['reaction_type']}\n"
+        f"Target: {row['target_quantity']}\n"
+        f"Database status: {new_status.upper()}\n\n"
+        "Note: Status save hua hai. Ye code actual reactions "
+        "automatically send nahi karta."
+    )
 
 
-async def start_reactions(
+async def startreactions(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-):
-    await set_reaction_status(update, context, "running")
+) -> None:
+    await _set_reaction_status(update, context, True)
 
 
-async def stop_reactions(
+async def stopreactions(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-):
-    await set_reaction_status(update, context, "stopped")
+) -> None:
+    await _set_reaction_status(update, context, False)
 
 
 def get_reaction_handlers():
     return [
-        CommandHandler("setreaction", set_reaction),
-        CommandHandler("reactiontasks", list_reaction_tasks),
-        CommandHandler("startreactions", start_reactions),
-        CommandHandler("stopreactions", stop_reactions),
+        CommandHandler("setreaction", setreaction),
+        CommandHandler("reactiontasks", reactiontasks),
+        CommandHandler("startreactions", startreactions),
+        CommandHandler("stopreactions", stopreactions),
     ]
