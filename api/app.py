@@ -1,11 +1,13 @@
 
-"""FastAPI application for the Telegram management system."""
+"""FastAPI application entry point."""
 
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy import text
 
+from api.routes import admin, accounts, channels, monitoring, reactions, reports
 from database.connection import close_database, init_database
 
 logger = logging.getLogger(__name__)
@@ -13,44 +15,50 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage database connection lifecycle."""
+    """Initialize and close shared database resources."""
+    logger.info("Initializing database connection...")
     await init_database()
-    logger.info("API database connection verified.")
 
     try:
         yield
     finally:
         await close_database()
-        logger.info("API shutdown complete.")
+        logger.info("Database connection closed.")
 
 
 app = FastAPI(
     title="Telegram Management API",
-    description="Backend API for the Telegram bot and Mini App.",
+    description="API for Telegram channel and account management.",
     version="1.0.0",
     lifespan=lifespan,
 )
 
+app.include_router(channels.router, prefix="/api")
+app.include_router(accounts.router, prefix="/api")
+app.include_router(reactions.router, prefix="/api")
+app.include_router(reports.router, prefix="/api")
+app.include_router(monitoring.router, prefix="/api")
+app.include_router(admin.router, prefix="/api")
+
 
 @app.get("/")
 async def root():
-    """Basic API information."""
+    """Basic service information."""
     return {
-        "name": "Telegram Management API",
+        "service": "Telegram Management API",
         "status": "running",
-        "docs": "/docs",
     }
 
 
 @app.get("/health")
 async def health():
-    """Check API and database availability."""
-    from sqlalchemy import text
+    """Check whether PostgreSQL is reachable."""
+    from database.connection import get_session_factory
 
-    from database.connection import engine
+    session_factory = get_session_factory()
 
-    async with engine.connect() as connection:
-        await connection.execute(text("SELECT 1"))
+    async with session_factory() as session:
+        await session.execute(text("SELECT 1"))
 
     return {
         "status": "healthy",
