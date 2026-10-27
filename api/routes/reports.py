@@ -1,56 +1,139 @@
 
-"""API endpoints for analytics and reports."""
+"""Reports and analytics API."""
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from typing import Literal
 
-from typing import Annotated
-
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import DatabaseSession, get_authenticated_user
-from database.models import AnalyticsRecord, User
-
+from database.connection import get_session
+from database.models import AnalyticsRecord, Channel
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
+ReportPeriod = Literal["24h", "72h", "1d", "1w", "1m"]
+
+
+class AnalyticsCreate(BaseModel):
+    channel_id: int = Field(gt=0)
+    source: str = Field(min_length=1, max_length=100)
+    metric_name: str = Field(min_length=1, max_length=100)
+    metric_value: int | None = None
+    details: dict | None = None
+
 
 class AnalyticsResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
-    channel_id: int | None
+    channel_id: int
+    source: str
     metric_name: str
-    metric_value: float
-    recorded_at: datetime
+    metric_value: int | None
+    observed_at: datetime
+    details: dict | None
+
+    model_config = {"from_attributes": True}
 
 
-@router.get("/analytics", response_model=list[AnalyticsResponse])
-async def get_analytics(
-    session: DatabaseSession,
-    user: Annotated[User, Depends(get_authenticated_user)],
+PERIOD_DAYS = {
+    "24h": 1,
+    "72h": 3,
+    "1d": 1,
+    "1w": 7,
+    "1m": 30,
+}
+
+
+@router.post("/records", response_model=AnalyticsResponse, status_code=201)
+async def create_analytics_record(
+    payload: AnalyticsCreate,
+    session: AsyncSession = Depends(get_session),
 ):
-    """Return stored analytics records for the authenticated user."""
-    result = await session.execute(
-        select(AnalyticsRecord).order_by(AnalyticsRecord.id.desc()).limit(500)
+    """Record a metric observation."""
+    channel = await session.get(Channel, payload.channel_id)
+
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found.")
+
+    record = AnalyticsRecord(
+        channel_id=payload.channel_id,
+        source=payload.source.strip(),
+        metric_name=payload.metric_name.strip(),
+        metric_value=payload.metric_value,
+        details=payload.details,
+        observed_at=datetime.now(timezone.utc),
     )
-    return result.scalars().all()
+
+    session.add(record)
+    await session.commit()
+    await session.refresh(record)
+    return record
+
+
+@router.get("", response_model=list[AnalyticsResponse])
+async def get_report(
+    channel_id: int | None = Query(default=None, gt=0),
+    period: ReportPeriod = "24h",
+    limit: int = Query(default=100, ge=1, le=1000),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return recorded metrics within the selected period."""
+    since = datetime.now(timezone.utc) - timedelta(
+        days=PERIOD_DAYS[period]
+    )
+
+    statement = (
+        select(AnalyticsRecord)
+        .where(AnalyticsRecord.observed_at >= since)
+        .order_by(AnalyticsRecord.observed_at.desc())
+        .limit(limit)
+    )
+
+    if channel_id is not None:
+        statement = statement.where(
+            AnalyticsRecord.channel_id == channel_id
+        )
+
+    result = await session.execute(statement)
+    return list(result.scalars().all())
 
 
 @router.get("/summary")
 async def get_report_summary(
-    session: DatabaseSession,
-    user: Annotated[User, Depends(get_authenticated_user)],
+    channel_id: int | None = Query(default=None, gt=0),
+    period: ReportPeriod = "24h",
+    session: AsyncSession = Depends(get_session),
 ):
-    """Return a basic summary of recorded analytics."""
-    result = await session.execute(select(AnalyticsRecord))
-    records = result.scalars().all()
+    """Summarize recorded values without inventing missing metrics."""
+    since = datetime.now(timezone.utc) - timedelta(
+        days=PERIOD_DAYS[period]
+    )
+
+    statement = select(AnalyticsRecord).where(
+        AnalyticsRecord.observed_at >= since
+    )
+
+    if channel_id is not None:
+        statement = statement.where(
+            AnalyticsRecord.channel_id == channel_id
+        )
+
+    result = await session.execute(statement)
+    records = list(result.scalars().all())
+
+    totals = {}
+    for record in records:
+        key = record.metric_name
+        if record.metric_value is not None:
+            totals[key] = totals.get(key, 0) + record.metric_value
 
     return {
-        "records_count": len(records),
-        "note": (
-            "Summary is based on stored analytics records only. "
-            "Missing metrics are not inferred."
+        "period": period,
+        "record_count": len(records),
+        "totals": totals,
+        "message": (
+            "Summary includes only recorded numeric metric values."
         ),
     }
