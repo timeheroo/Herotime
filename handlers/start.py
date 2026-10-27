@@ -1,159 +1,22 @@
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import CommandHandler, ContextTypes
 
 from config import OWNER_ADMIN_ID
-from utils.permissions import has_permission, get_admin
+from utils.permissions import get_admin, has_permission
 
 
-MENUS = {
-    "admins": {
-        "title": "👥 Admin Management",
-        "permission": "manage_admins",
-        "commands": [
-            ("📋 List admins", "/admins"),
-            ("➕ Add admin", "Usage: /addadmin USER_ID"),
-            ("➖ Remove admin", "Usage: /removeadmin USER_ID"),
-            ("🔐 Grant permission", "Usage: /grant USER_ID PERMISSION"),
-            ("🔒 Revoke permission", "Usage: /revoke USER_ID PERMISSION"),
-        ],
-    },
-    "channels": {
-        "title": "📢 Channel Management",
-        "permission": "manage_channels",
-        "commands": [
-            ("📋 List channels", "/channels"),
-            ("➕ Add channel", "Usage: /addchannel @username"),
-            ("🟢 Activate channel", "Usage: /activatechannel CHANNEL_ID"),
-            ("🔴 Deactivate channel", "Usage: /deactivatechannel CHANNEL_ID"),
-        ],
-    },
-    "accounts": {
-        "title": "📱 Account Records",
-        "permission": "manage_accounts",
-        "commands": [
-            ("📋 List accounts", "/accounts"),
-            ("➕ Add account record", "Usage: /addaccount ACCOUNT_LABEL"),
-            ("🔴 Deactivate account", "Usage: /deactivateaccount ACCOUNT_ID"),
-        ],
-    },
-    "live": {
-        "title": "🔴 Live Settings",
-        "permission": "manage_live",
-        "commands": [
-            ("📋 View live tasks", "/livetasks"),
-            ("🎯 Set target", "Usage: /setlivetarget CHANNEL_ID QUANTITY"),
-            ("▶️ Start task", "Usage: /startlive TASK_ID"),
-            ("⏹ Stop task", "Usage: /stoplive TASK_ID"),
-        ],
-    },
-    "reactions": {
-        "title": "❤️ Reaction Settings",
-        "permission": "manage_reactions",
-        "commands": [
-            ("📋 View reaction tasks", "/reactiontasks"),
-            ("⚙️ Set reaction", "Usage: /setreaction CHANNEL_ID REACTION QUANTITY"),
-            ("▶️ Start task", "Usage: /startreactions TASK_ID"),
-            ("⏹ Stop task", "Usage: /stopreactions TASK_ID"),
-        ],
-    },
-    "reports": {
-        "title": "📊 Reports",
-        "permission": "view_reports",
-        "commands": [
-            ("📅 Daily", "/report daily"),
-            ("📆 Weekly", "/report weekly"),
-            ("🗓 Monthly", "/report monthly"),
-            ("🕐 Last 24 hours", "/report 24h"),
-            ("🕒 Last 72 hours", "/report 72h"),
-            ("🧾 Recent activity", "/recentactivity"),
-        ],
-    },
-}
+MENU = ReplyKeyboardMarkup(
+    [
+        ["API Accounts", "Channels / Groups"],
+        ["Live Tasks", "Reaction Tasks"],
+        ["Reports", "Admin Help"],
+    ],
+    resize_keyboard=True,
+)
 
 
-def main_menu(user_id: int) -> InlineKeyboardMarkup:
-    rows = []
-
-    if user_id == OWNER_ADMIN_ID:
-        permissions = set(MENUS.keys())
-    else:
-        permissions = set()
-
-    # Permission checks are performed asynchronously in start_command.
-    # This helper builds the keyboard from the supplied allowed sections.
-    for key, label in [
-        ("admins", "👥 Manage Admins"),
-        ("channels", "📢 Channels"),
-        ("accounts", "📱 Accounts"),
-        ("live", "🔴 Live Settings"),
-        ("reactions", "❤️ Reaction Settings"),
-        ("reports", "📊 Reports"),
-    ]:
-        if key in permissions:
-            rows.append([
-                InlineKeyboardButton(label, callback_data=f"section_{key}")
-            ])
-
-    rows.append([
-        InlineKeyboardButton("❓ Help", callback_data="section_help")
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-async def get_allowed_sections(user_id: int) -> list[str]:
-    if user_id == OWNER_ADMIN_ID:
-        return list(MENUS.keys())
-
-    allowed = []
-    for key, menu in MENUS.items():
-        if await has_permission(user_id, menu["permission"]):
-            allowed.append(key)
-
-    return allowed
-
-
-def build_main_menu(sections: list[str]) -> InlineKeyboardMarkup:
-    labels = {
-        "admins": "👥 Manage Admins",
-        "channels": "📢 Channels",
-        "accounts": "📱 Accounts",
-        "live": "🔴 Live Settings",
-        "reactions": "❤️ Reaction Settings",
-        "reports": "📊 Reports",
-    }
-
-    rows = [
-        [InlineKeyboardButton(labels[key], callback_data=f"section_{key}")]
-        for key in sections
-        if key in labels
-    ]
-    rows.append([
-        InlineKeyboardButton("❓ Help", callback_data="section_help")
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def build_section_menu(section: str) -> InlineKeyboardMarkup:
-    menu = MENUS[section]
-    rows = []
-
-    for label, command in menu["commands"]:
-        rows.append([
-            InlineKeyboardButton(label, callback_data=f"info_{section}_{len(rows)}")
-        ])
-
-    rows.append([
-        InlineKeyboardButton("⬅️ Main Menu", callback_data="section_home")
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-async def start_command(
+async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
@@ -163,147 +26,149 @@ async def start_command(
     if user is None or message is None:
         return
 
-    sections = await get_allowed_sections(user.id)
+    admin = await get_admin(user.id)
 
-    if user.id != OWNER_ADMIN_ID and not sections:
-        admin = await get_admin(user.id)
-        if admin is None:
-            await message.reply_text(
-                "Welcome!\n\nAccess nahi mila hai. Owner Admin se contact karein."
-            )
-        else:
-            await message.reply_text(
-                "Aapke account par abhi koi management permission nahi hai. "
-                "Owner Admin se permission lein."
-            )
+    if admin is None and user.id != OWNER_ADMIN_ID:
+        await message.reply_text(
+            "Access denied. Bot owner se access request karein."
+        )
         return
 
-    role = "Owner Admin" if user.id == OWNER_ADMIN_ID else "Admin"
     await message.reply_text(
-        f"👑 Welcome, {role}!\n\nMenu se ek section select karein:",
-        reply_markup=build_main_menu(sections),
+        "Welcome to the Admin Management Bot.\n\n"
+        "Menu se section select karein. "
+        "Available actions aapki permissions par depend karte hain.",
+        reply_markup=MENU,
     )
+
+
+async def menu_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    user = update.effective_user
+    message = update.effective_message
+
+    if user is None or message is None or not message.text:
+        return
+
+    admin = await get_admin(user.id)
+
+    if admin is None and user.id != OWNER_ADMIN_ID:
+        await message.reply_text("Access denied.")
+        return
+
+    section = message.text.strip()
+
+    if section == "API Accounts":
+        if not await has_permission(user.id, "manage_accounts"):
+            await message.reply_text("Is section ki permission nahi hai.")
+            return
+
+        await message.reply_text(
+            "API Accounts Commands:\n\n"
+            "/addapi NAME API_ID API_HASH\n"
+            "/apiconfigs\n"
+            "/renameapi CONFIG_ID NEW_NAME\n"
+            "/activateapi CONFIG_ID\n"
+            "/deactivateapi CONFIG_ID\n"
+            "/removeapi CONFIG_ID\n\n"
+            "API Hash ko sirf private chat mein enter karein."
+        )
+
+    elif section == "Channels / Groups":
+        if not await has_permission(user.id, "manage_channels"):
+            await message.reply_text("Is section ki permission nahi hai.")
+            return
+
+        await message.reply_text(
+            "Channels / Groups Commands:\n\n"
+            "/addchannel @username\n"
+            "/addchannel https://t.me/username\n"
+            "/channels\n"
+            "/activatechannel @username\n"
+            "/deactivatechannel @username"
+        )
+
+    elif section == "Live Tasks":
+        if not await has_permission(user.id, "manage_live"):
+            await message.reply_text("Is section ki permission nahi hai.")
+            return
+
+        await message.reply_text(
+            "Live Task Commands:\n\n"
+            "/setlivetarget @username QUANTITY\n"
+            "/livetasks\n"
+            "/startlive TASK_ID\n"
+            "/stoplive TASK_ID\n\n"
+            "Note: Ye configuration commands hain; "
+            "actual live-stream worker alag se chahiye."
+        )
+
+    elif section == "Reaction Tasks":
+        if not await has_permission(user.id, "manage_reactions"):
+            await message.reply_text("Is section ki permission nahi hai.")
+            return
+
+        await message.reply_text(
+            "Reaction Task Commands:\n\n"
+            "/setreaction @username REACTION QUANTITY\n"
+            "/reactiontasks\n"
+            "/startreactions TASK_ID\n"
+            "/stopreactions TASK_ID\n\n"
+            "Note: Ye task configuration aur status manage karte hain."
+        )
+
+    elif section == "Reports":
+        if not await has_permission(user.id, "view_reports"):
+            await message.reply_text("Reports ki permission nahi hai.")
+            return
+
+        await message.reply_text(
+            "Report Commands:\n\n"
+            "/report 24h\n"
+            "/report 72h\n"
+            "/report daily\n"
+            "/report weekly\n"
+            "/report monthly\n"
+            "/recentactivity"
+        )
+
+    elif section == "Admin Help":
+        await message.reply_text(
+            "Admin Help:\n\n"
+            "/start - Main menu\n"
+            "/help - Command overview\n\n"
+            "Owner-admin permissions aur sub-admin permissions "
+            "alag ho sakti hain. API credentials private rakhein."
+        )
+
+    else:
+        await message.reply_text(
+            "Menu mein se koi section select karein ya /start type karein."
+        )
 
 
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    user = update.effective_user
-    message = update.effective_message
-
-    if user is None or message is None:
-        return
-
-    sections = await get_allowed_sections(user.id)
-    if user.id != OWNER_ADMIN_ID and not sections:
-        await message.reply_text(
-            "Help aur management commands ke liye Owner Admin se access lein."
-        )
-        return
-
-    lines = [
-        "📋 Help Menu",
-        "",
-        "/start - Open menu",
-        "/help - Show help",
-    ]
-
-    for section in sections:
-        if section in MENUS:
-            lines.append("")
-            lines.append(MENUS[section]["title"])
-            for _, command in MENUS[section]["commands"]:
-                lines.append(command)
-
-    await message.reply_text("\n".join(lines))
-
-
-async def menu_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    query = update.callback_query
-    user = update.effective_user
-
-    if query is None or user is None:
-        return
-
-    data = query.data or ""
-    sections = await get_allowed_sections(user.id)
-
-    if data == "section_help":
-        await query.answer()
-        await query.message.reply_text(
-            "❓ Help\n\n/start - Main menu\n/help - Available commands"
-        )
-        return
-
-    if data == "section_home":
-        await query.answer()
-        await query.message.reply_text(
-            "🏠 Main Menu",
-            reply_markup=build_main_menu(sections),
-        )
-        return
-
-    if data.startswith("section_"):
-        section = data.removeprefix("section_")
-
-        if section not in MENUS or section not in sections:
-            await query.answer(
-                "Aapke paas is section ki permission nahi hai.",
-                show_alert=True,
-            )
-            return
-
-        await query.answer()
-        await query.message.reply_text(
-            f"{MENUS[section]['title']}\n\n"
-            "Neeche option select karein. Command ko use karne ke liye "
-            "button ke saath dikhayi gayi command ko chat mein bhejein.",
-            reply_markup=build_section_menu(section),
-        )
-        return
-
-    if data.startswith("info_"):
-        parts = data.split("_")
-        if len(parts) < 3:
-            await query.answer("Invalid option.", show_alert=True)
-            return
-
-        section = parts[1]
-        if section not in MENUS or section not in sections:
-            await query.answer(
-                "Aapke paas is section ki permission nahi hai.",
-                show_alert=True,
-            )
-            return
-
-        try:
-            index = int(parts[2])
-            label, command = MENUS[section]["commands"][index]
-        except (ValueError, IndexError):
-            await query.answer("Option nahi mila.", show_alert=True)
-            return
-
-        await query.answer()
-        await query.message.reply_text(
-            f"{label}\n\n{command}\n\n"
-            "Note: Yeh button command ki details dikhata hai; "
-            "command ko chat mein alag se bhejna hoga."
-        )
-        return
-
-    await query.answer("Unknown menu option.", show_alert=True)
+    await start(update, context)
 
 
 def get_start_handlers():
     return [
-        CommandHandler("start", start_command),
+        CommandHandler("start", start),
         CommandHandler("help", help_command),
-        CallbackQueryHandler(
-            menu_callback,
-            pattern=r"^(section_|info_)",
-        ),
+    ]
+
+
+def get_menu_handlers():
+    from telegram.ext import MessageHandler, filters
+
+    return [
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            menu_router,
+        )
     ]
