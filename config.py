@@ -17,10 +17,6 @@ class Settings(BaseSettings):
     DATABASE_URL: str = Field(min_length=1)
     OWNER_ID: int = Field(gt=0)
 
-    # Required by Pyrogram for Telegram API access.
-    API_ID: int = Field(gt=0)
-    API_HASH: str = Field(min_length=1)
-
     @field_validator("DATABASE_URL")
     @classmethod
     def normalize_database_url(cls, value: str) -> str:
@@ -48,5 +44,3 @@ settings = Settings()
 BOT_TOKEN = settings.BOT_TOKEN
 DATABASE_URL = settings.DATABASE_URL
 OWNER_ID = settings.OWNER_ID
-API_ID = settings.API_ID
-API_HASH = settings.API_HASH
