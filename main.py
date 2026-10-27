@@ -14,6 +14,8 @@ from database.connection import (
     create_tables,
     init_database,
 )
+from bot.handlers import register_handlers
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,8 +28,11 @@ logger = logging.getLogger(__name__)
 async def main() -> None:
     bot = Bot(
         token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML,
+        ),
     )
+
     dispatcher = Dispatcher()
 
     try:
@@ -37,8 +42,10 @@ async def main() -> None:
         logger.info("Creating database tables...")
         await create_tables()
 
-        # Handlers will be registered with Aiogram in the next step.
-        logger.info("Starting Telegram bot...")
+        logger.info("Registering Telegram bot handlers...")
+        await register_handlers(dispatcher)
+
+        logger.info("Starting Telegram bot polling...")
         await dispatcher.start_polling(bot)
 
     except Exception:
