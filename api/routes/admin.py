@@ -1,95 +1,126 @@
 
-"""Owner-only API endpoints for administrator permissions."""
+"""Admin and feature-permission management API."""
 
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import DatabaseSession, require_owner
+from database.connection import get_session
 from database.models import AdminPermission, User
-
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
-class PermissionUpdate(BaseModel):
+class PermissionCreate(BaseModel):
     user_id: int = Field(gt=0)
     permission: str = Field(min_length=1, max_length=100)
-    enabled: bool
+    is_enabled: bool = True
 
 
-@router.get("/permissions")
-async def list_admin_permissions(
-    session: DatabaseSession,
-    owner: Annotated[User, Depends(require_owner)],
+class PermissionUpdate(BaseModel):
+    is_enabled: bool
+
+
+class PermissionResponse(BaseModel):
+    id: int
+    user_id: int
+    permission: str
+    is_enabled: bool
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/permissions", response_model=list[PermissionResponse])
+async def list_permissions(
+    user_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
 ):
-    """List configured administrator permissions."""
-    result = await session.execute(
-        select(AdminPermission).order_by(AdminPermission.id.desc())
+    """List stored permissions, optionally for one user."""
+    statement = select(AdminPermission).order_by(AdminPermission.id.desc())
+
+    if user_id is not None:
+        statement = statement.where(AdminPermission.user_id == user_id)
+
+    result = await session.execute(statement)
+    return list(result.scalars().all())
+
+
+@router.post(
+    "/permissions",
+    response_model=PermissionResponse,
+    status_code=201,
+)
+async def create_permission(
+    payload: PermissionCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Create a permission entry for an existing user."""
+    user = await session.get(User, payload.user_id)
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    permission_name = payload.permission.strip()
+
+    if not permission_name:
+        raise HTTPException(
+            status_code=422,
+            detail="Permission name cannot be empty.",
+        )
+
+    item = AdminPermission(
+        user_id=payload.user_id,
+        permission=permission_name,
+        is_enabled=payload.is_enabled,
     )
-    permissions = result.scalars().all()
+    session.add(item)
 
-    return [
-        {
-            "id": item.id,
-            "user_id": item.user_id,
-            "permission": item.permission,
-            "enabled": item.enabled,
-        }
-        for item in permissions
-    ]
+    try:
+        await session.commit()
+        await session.refresh(item)
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This user already has a record for that permission.",
+        )
+
+    return item
 
 
-@router.put("/permissions")
-async def update_admin_permission(
+@router.patch(
+    "/permissions/{permission_id}",
+    response_model=PermissionResponse,
+)
+async def update_permission(
+    permission_id: int,
     payload: PermissionUpdate,
-    session: DatabaseSession,
-    owner: Annotated[User, Depends(require_owner)],
+    session: AsyncSession = Depends(get_session),
 ):
-    """Create or update a permission for an existing user."""
-    target_result = await session.execute(
-        select(User).where(User.id == payload.user_id)
-    )
-    target_user = target_result.scalar_one_or_none()
+    """Enable or disable a stored permission."""
+    item = await session.get(AdminPermission, permission_id)
 
-    if target_user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found.",
-        )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Permission not found.")
 
-    if target_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Permissions can only be assigned to admin users.",
-        )
-
-    result = await session.execute(
-        select(AdminPermission).where(
-            AdminPermission.user_id == payload.user_id,
-            AdminPermission.permission == payload.permission,
-        )
-    )
-    record = result.scalar_one_or_none()
-
-    if record is None:
-        record = AdminPermission(
-            user_id=payload.user_id,
-            permission=payload.permission,
-            enabled=payload.enabled,
-        )
-        session.add(record)
-    else:
-        record.enabled = payload.enabled
-
+    item.is_enabled = payload.is_enabled
     await session.commit()
-    await session.refresh(record)
+    await session.refresh(item)
+    return item
 
-    return {
-        "success": True,
-        "user_id": record.user_id,
-        "permission": record.permission,
-        "enabled": record.enabled,
-    }
+
+@router.delete("/permissions/{permission_id}", status_code=204)
+async def delete_permission(
+    permission_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete a permission entry."""
+    item = await session.get(AdminPermission, permission_id)
+
+    if item is None:
+        raise HTTPException(status_code=404, detail="Permission not found.")
+
+    await session.delete(item)
+    await session.commit()
