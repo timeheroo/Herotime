@@ -1,16 +1,22 @@
 
-"""Reaction configuration API routes."""
+"""Authenticated reaction configuration API routes."""
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.connection import get_session
-from database.models import Channel, ReactionConfig
+from api.dependencies import DatabaseSession, require_permission
+from database.models import Channel, ReactionConfig, User
 
 router = APIRouter(prefix="/reactions", tags=["Reactions"])
+
+ReactionManager = Annotated[
+    User,
+    Depends(require_permission("reaction_management")),
+]
 
 
 class ReactionCreate(BaseModel):
@@ -18,6 +24,14 @@ class ReactionCreate(BaseModel):
     emoji: str = Field(min_length=1, max_length=32)
     configured_quantity: int = Field(default=0, ge=0, le=100000)
     is_enabled: bool = False
+
+    @field_validator("emoji")
+    @classmethod
+    def validate_emoji(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Emoji cannot be empty.")
+        return value
 
 
 class ReactionUpdate(BaseModel):
@@ -37,16 +51,24 @@ class ReactionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-@router.post("", response_model=ReactionResponse, status_code=201)
+@router.post(
+    "",
+    response_model=ReactionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_reaction_config(
     payload: ReactionCreate,
-    session: AsyncSession = Depends(get_session),
+    _user: ReactionManager,
+    session: DatabaseSession,
 ):
-    """Create a reaction preference for a registered channel."""
+    """Save a reaction preference for a registered channel."""
     channel = await session.get(Channel, payload.channel_id)
 
     if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Channel not found.",
+        )
 
     if not channel.is_active and payload.is_enabled:
         raise HTTPException(
@@ -56,36 +78,37 @@ async def create_reaction_config(
 
     config = ReactionConfig(
         channel_id=payload.channel_id,
-        emoji=payload.emoji.strip(),
+        emoji=payload.emoji,
         configured_quantity=payload.configured_quantity,
         is_enabled=payload.is_enabled,
     )
-
-    if not config.emoji:
-        raise HTTPException(status_code=422, detail="Emoji cannot be empty.")
-
     session.add(config)
 
     try:
         await session.commit()
         await session.refresh(config)
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
             status_code=409,
             detail="A configuration for this channel and emoji already exists.",
-        )
+        ) from exc
 
     return config
 
 
 @router.get("", response_model=list[ReactionResponse])
 async def list_reaction_configs(
+    _user: ReactionManager,
     channel_id: int | None = None,
-    session: AsyncSession = Depends(get_session),
+    session: DatabaseSession = Depends(
+        __import__("api.dependencies", fromlist=["get_db_session"]).get_db_session
+    ),
 ):
     """List saved reaction configurations."""
-    statement = select(ReactionConfig).order_by(ReactionConfig.id.desc())
+    statement = select(ReactionConfig).order_by(
+        ReactionConfig.id.desc()
+    )
 
     if channel_id is not None:
         statement = statement.where(
@@ -100,9 +123,10 @@ async def list_reaction_configs(
 async def update_reaction_config(
     config_id: int,
     payload: ReactionUpdate,
-    session: AsyncSession = Depends(get_session),
+    _user: ReactionManager,
+    session: DatabaseSession,
 ):
-    """Update a saved configuration; this does not send reactions."""
+    """Update configuration only; this does not send reactions."""
     config = await session.get(ReactionConfig, config_id)
 
     if config is None:
@@ -119,15 +143,23 @@ async def update_reaction_config(
     if "is_enabled" in changes:
         config.is_enabled = payload.is_enabled
 
+    channel = await session.get(Channel, config.channel_id)
+    if channel is not None and not channel.is_active and config.is_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Reactivate the channel before enabling its configuration.",
+        )
+
     await session.commit()
     await session.refresh(config)
     return config
 
 
-@router.delete("/{config_id}", status_code=204)
+@router.delete("/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_reaction_config(
     config_id: int,
-    session: AsyncSession = Depends(get_session),
+    _user: ReactionManager,
+    session: DatabaseSession,
 ):
     """Delete a saved reaction preference."""
     config = await session.get(ReactionConfig, config_id)
