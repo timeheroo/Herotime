@@ -20,19 +20,17 @@ PERIODS = {
 async def report_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Show task counts and audit activity for a selected period."""
-    user = update.effective_user
-    message = update.effective_message
-
-    if user is None or message is None:
+):
+    if not update.effective_user or not update.message:
         return
 
-    allowed, reason = await require_permission(
-        user.id, "view_reports"
+    user_id = update.effective_user.id
+
+    allowed, message = await require_permission(
+        user_id, "view_reports"
     )
     if not allowed:
-        await message.reply_text(reason)
+        await update.message.reply_text(message)
         return
 
     period_name = (
@@ -42,8 +40,14 @@ async def report_command(
     )
 
     if period_name not in PERIODS:
-        await message.reply_text(
-            "Usage: /report daily|weekly|monthly|24h|72h"
+        await update.message.reply_text(
+            "Usage: /report [24h|72h|daily|weekly|monthly]\n\n"
+            "Examples:\n"
+            "/report daily\n"
+            "/report 24h\n"
+            "/report 72h\n"
+            "/report weekly\n"
+            "/report monthly"
         )
         return
 
@@ -55,25 +59,34 @@ async def report_command(
             """
             SELECT COUNT(*)
             FROM channels
-            WHERE created_at >= NOW() - $1::interval
+            WHERE created_at >= NOW() - $1
             """,
             interval,
         )
 
-        live_count = await conn.fetchval(
+        live_task_count = await conn.fetchval(
             """
             SELECT COUNT(*)
             FROM live_tasks
-            WHERE created_at >= NOW() - $1::interval
+            WHERE created_at >= NOW() - $1
             """,
             interval,
         )
 
-        reaction_count = await conn.fetchval(
+        reaction_task_count = await conn.fetchval(
             """
             SELECT COUNT(*)
             FROM reaction_tasks
-            WHERE created_at >= NOW() - $1::interval
+            WHERE created_at >= NOW() - $1
+            """,
+            interval,
+        )
+
+        account_count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM accounts
+            WHERE created_at >= NOW() - $1
             """,
             interval,
         )
@@ -82,16 +95,16 @@ async def report_command(
             """
             SELECT COUNT(*)
             FROM activity_logs
-            WHERE created_at >= NOW() - $1::interval
+            WHERE created_at >= NOW() - $1
             """,
             interval,
         )
 
-        top_actions = await conn.fetch(
+        action_rows = await conn.fetch(
             """
             SELECT action, COUNT(*) AS total
             FROM activity_logs
-            WHERE created_at >= NOW() - $1::interval
+            WHERE created_at >= NOW() - $1
             GROUP BY action
             ORDER BY total DESC
             LIMIT 10
@@ -100,47 +113,47 @@ async def report_command(
         )
 
     lines = [
-        f"📊 Activity Report — {period_name}",
+        f"📊 Activity Report: {period_name}",
         "",
         f"New channel records: {channel_count}",
-        f"New live task records: {live_count}",
-        f"New reaction task records: {reaction_count}",
-        f"Recorded admin actions: {activity_count}",
+        f"New account records: {account_count}",
+        f"New live task records: {live_task_count}",
+        f"New reaction task records: {reaction_task_count}",
+        f"Logged activities: {activity_count}",
         "",
         "Top recorded actions:",
     ]
 
-    if top_actions:
-        for row in top_actions:
-            lines.append(f"• {row['action']}: {row['total']}")
+    if action_rows:
+        for row in action_rows:
+            lines.append(
+                f"• {row['action']}: {row['total']}"
+            )
     else:
-        lines.append("• Is period mein koi activity log nahi mila.")
+        lines.append("Is period mein koi logged action nahi mila.")
 
     lines.extend([
         "",
-        "Note: Yeh database records aur audit actions hain, "
-        "actual viewers, reactions ya spending nahi."
+        "Note: Yeh database records aur audit logs ki report hai.",
+        "Yeh actual viewers, reactions ya financial spending "
+        "ka measurement nahi hai.",
     ])
 
-    await message.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines))
 
 
 async def recent_activity_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-    """Show recent audit events."""
-    user = update.effective_user
-    message = update.effective_message
-
-    if user is None or message is None:
+):
+    if not update.effective_user or not update.message:
         return
 
-    allowed, reason = await require_permission(
-        user.id, "view_reports"
+    allowed, message = await require_permission(
+        update.effective_user.id, "view_reports"
     )
     if not allowed:
-        await message.reply_text(reason)
+        await update.message.reply_text(message)
         return
 
     pool = await get_pool()
@@ -156,20 +169,21 @@ async def recent_activity_command(
         )
 
     if not rows:
-        await message.reply_text("Abhi koi activity log available nahi hai.")
+        await update.message.reply_text(
+            "Abhi activity logs available nahi hain."
+        )
         return
 
-    lines = ["🧾 Recent Activity"]
+    lines = ["🧾 Recent Activity (latest 20):", ""]
 
     for row in rows:
-        timestamp = row["created_at"].strftime("%Y-%m-%d %H:%M UTC")
         lines.append(
-            f"\nTime: {timestamp}\n"
+            f"Action: {row['action']}\n"
             f"Admin ID: {row['actor_id']}\n"
-            f"Action: {row['action']}"
+            f"Time: {row['created_at']}\n"
         )
 
-    await message.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines))
 
 
 def get_report_handlers():
