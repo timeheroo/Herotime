@@ -395,4 +395,4 @@ def get_admin_handlers():
         CommandHandler("grant", grant_permission),
         CommandHandler("revoke", revoke_permission),
         CommandHandler("admins", list_admins),
-  ]
+    ]
