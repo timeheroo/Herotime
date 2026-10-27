@@ -1,13 +1,19 @@
 
-"""Admin and feature-permission management API."""
+"""Secure admin and feature-permission management API."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.connection import get_session
+from api.dependencies import (
+    DatabaseSession,
+    require_owner,
+    require_permission,
+)
 from database.models import AdminPermission, User
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -15,7 +21,7 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 
 class PermissionCreate(BaseModel):
     user_id: int = Field(gt=0)
-    permission: str = Field(min_length=1, max_length=100)
+    permission: str = Field(min_length=1, max_length=80)
     is_enabled: bool = True
 
 
@@ -32,16 +38,31 @@ class PermissionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-@router.get("/permissions", response_model=list[PermissionResponse])
+OwnerUser = Annotated[User, Depends(require_owner)]
+AdminUser = Annotated[
+    User,
+    Depends(require_permission("admin_permissions")),
+]
+
+
+@router.get(
+    "/permissions",
+    response_model=list[PermissionResponse],
+)
 async def list_permissions(
+    _user: AdminUser,
     user_id: int | None = None,
-    session: AsyncSession = Depends(get_session),
+    session: DatabaseSession = None,
 ):
-    """List stored permissions, optionally for one user."""
-    statement = select(AdminPermission).order_by(AdminPermission.id.desc())
+    """List permissions; requires admin_permissions access."""
+    statement = select(AdminPermission).order_by(
+        AdminPermission.id.desc()
+    )
 
     if user_id is not None:
-        statement = statement.where(AdminPermission.user_id == user_id)
+        statement = statement.where(
+            AdminPermission.user_id == user_id
+        )
 
     result = await session.execute(statement)
     return list(result.scalars().all())
@@ -50,24 +71,34 @@ async def list_permissions(
 @router.post(
     "/permissions",
     response_model=PermissionResponse,
-    status_code=201,
+    status_code=status.HTTP_201_CREATED,
 )
 async def create_permission(
     payload: PermissionCreate,
-    session: AsyncSession = Depends(get_session),
+    _user: OwnerUser,
+    session: DatabaseSession,
 ):
-    """Create a permission entry for an existing user."""
+    """Only the owner can create permission records."""
     user = await session.get(User, payload.user_id)
 
     if user is None:
-        raise HTTPException(status_code=404, detail="User not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
 
     permission_name = payload.permission.strip()
 
     if not permission_name:
         raise HTTPException(
-            status_code=422,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Permission name cannot be empty.",
+        )
+
+    if user.telegram_id == __import__("config").OWNER_ID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Do not assign feature permissions to the owner.",
         )
 
     item = AdminPermission(
@@ -80,12 +111,12 @@ async def create_permission(
     try:
         await session.commit()
         await session.refresh(item)
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="This user already has a record for that permission.",
-        )
+        ) from exc
 
     return item
 
@@ -97,13 +128,33 @@ async def create_permission(
 async def update_permission(
     permission_id: int,
     payload: PermissionUpdate,
-    session: AsyncSession = Depends(get_session),
+    _user: OwnerUser,
+    session: DatabaseSession,
 ):
-    """Enable or disable a stored permission."""
+    """Only the owner can change feature permissions."""
     item = await session.get(AdminPermission, permission_id)
 
     if item is None:
-        raise HTTPException(status_code=404, detail="Permission not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Permission not found.",
+        )
+
+    target_user = await session.get(User, item.user_id)
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Permission target user not found.",
+        )
+
+    from config import OWNER_ID
+
+    if target_user.telegram_id == OWNER_ID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Owner permissions cannot be modified here.",
+        )
 
     item.is_enabled = payload.is_enabled
     await session.commit()
@@ -111,16 +162,34 @@ async def update_permission(
     return item
 
 
-@router.delete("/permissions/{permission_id}", status_code=204)
+@router.delete(
+    "/permissions/{permission_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 async def delete_permission(
     permission_id: int,
-    session: AsyncSession = Depends(get_session),
+    _user: OwnerUser,
+    session: DatabaseSession,
 ):
-    """Delete a permission entry."""
+    """Only the owner can delete feature permissions."""
     item = await session.get(AdminPermission, permission_id)
 
     if item is None:
-        raise HTTPException(status_code=404, detail="Permission not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Permission not found.",
+        )
+
+    target_user = await session.get(User, item.user_id)
+
+    if target_user is not None:
+        from config import OWNER_ID
+
+        if target_user.telegram_id == OWNER_ID:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Owner permissions cannot be deleted here.",
+            )
 
     await session.delete(item)
     await session.commit()
