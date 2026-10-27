@@ -1,306 +1,512 @@
-"""Telegram bot handlers and main menu."""
+
+"""Telegram bot handlers for channel management."""
 
 import logging
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from config import OWNER_ID
+from database.connection import SessionFactory
+from database.repositories import (
+    create_channel,
+    create_user,
+    deactivate_channel,
+    get_channel,
+    list_channels,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-MAIN_MENU_BUTTONS = [
-    "Channel Management",
-    "Reaction Management",
-    "Account Management",
-    "Reports/Analytics",
-    "Live Stream Management",
-    "Admin Permissions",
-]
 
-REACTION_MENU_BUTTONS = [
-    "Service Reaction",
-    "Channel Reaction",
-    "⬅️ Back to Main Menu",
-]
+# -------------------- MENUS --------------------
 
-
-def make_keyboard(
-    buttons: list[str],
-    columns: int = 2,
-) -> ReplyKeyboardMarkup:
-    """Create a reply keyboard."""
-    if columns < 1:
-        raise ValueError("columns must be at least 1")
-
-    rows = []
-    for start in range(0, len(buttons), columns):
-        row = [
-            KeyboardButton(text=button)
-            for button in buttons[start : start + columns]
-        ]
-        rows.append(row)
-
+def make_keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=rows,
+        keyboard=[
+            [KeyboardButton(text=label) for label in row]
+            for row in rows
+        ],
         resize_keyboard=True,
-        one_time_keyboard=False,
     )
 
 
 def get_main_menu() -> ReplyKeyboardMarkup:
-    """Return the main menu keyboard."""
-    return make_keyboard(MAIN_MENU_BUTTONS, columns=2)
-
-
-def get_reaction_menu() -> ReplyKeyboardMarkup:
-    """Return the reaction management keyboard."""
-    return make_keyboard(REACTION_MENU_BUTTONS, columns=1)
-
-
-def get_channel_reaction_menu() -> ReplyKeyboardMarkup:
-    """Return the channel reaction keyboard."""
-    return make_keyboard(
-        [
-            "📋 List Channels",
-            "➕ Set Reaction Quantity",
-            "▶️ Start Reaction Service",
-            "⏹ Stop Reaction Service",
-            "⬅️ Back to Reaction Menu",
-            "🏠 Back to Main Menu",
-        ],
-        columns=1,
-    )
-
-
-def get_service_reaction_menu() -> ReplyKeyboardMarkup:
-    """Return the service reaction keyboard."""
-    return make_keyboard(
-        [
-            "📋 List Reaction Accounts",
-            "⬅️ Back to Reaction Menu",
-            "🏠 Back to Main Menu",
-        ],
-        columns=1,
-    )
+    return make_keyboard([
+        ["📡 Channel Management"],
+        ["😀 Reaction Management", "👤 Account Management"],
+        ["📊 Reports/Analytics"],
+        ["🔴 Live Stream Management"],
+        ["🔐 Admin Permissions"],
+    ])
 
 
 def get_channel_management_menu() -> ReplyKeyboardMarkup:
-    """Return the channel management keyboard."""
-    return make_keyboard(
-        [
-            "➕ Add Channel",
-            "📋 List Channels",
-            "⏸ Deactivate Channel",
-            "▶️ Reactivate Channel",
-            "⬅️ Back to Main Menu",
-        ],
-        columns=1,
+    return make_keyboard([
+        ["➕ Add Channel", "📋 List Channels"],
+        ["⏸️ Deactivate Channel", "▶️ Reactivate Channel"],
+        ["⬅️ Back to Main Menu"],
+    ])
+
+
+def get_reaction_menu() -> ReplyKeyboardMarkup:
+    return make_keyboard([
+        ["📡 Channel Management"],
+        ["⬅️ Back to Main Menu"],
+    ])
+
+
+# -------------------- FSM STATES --------------------
+
+class AddChannelStates(StatesGroup):
+    title = State()
+    username_or_link = State()
+
+
+class ChannelActionStates(StatesGroup):
+    deactivate_id = State()
+    reactivate_id = State()
+
+
+# -------------------- HELPERS --------------------
+
+def is_owner(message: Message) -> bool:
+    return bool(message.from_user and message.from_user.id == OWNER_ID)
+
+
+async def ensure_user(message: Message) -> int | None:
+    """Register or update the Telegram user and return the database ID."""
+    if not message.from_user:
+        return None
+
+    async with SessionFactory() as session:
+        user = await create_user(
+            session=session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            display_name=message.from_user.full_name,
+        )
+        return user.id
+
+
+def format_channel(channel) -> str:
+    status = "Active" if channel.is_active else "Inactive"
+    username = f"@{channel.username}" if channel.username else "Not set"
+    link = channel.chat_link or "Not set"
+
+    return (
+        f"ID: {channel.id}\n"
+        f"Title: {channel.title}\n"
+        f"Username: {username}\n"
+        f"Link: {link}\n"
+        f"Status: {status}"
     )
 
+
+# -------------------- START --------------------
 
 @router.message(CommandStart())
-async def start_handler(message: Message) -> None:
-    """Handle /start."""
-    if message.from_user is None:
-        return
+async def start_handler(message: Message, state: FSMContext):
+    await state.clear()
 
-    await message.answer(
-        "Welcome! Telegram Management Bot is running.\n\n"
-        "Choose an option from the menu below.",
-        reply_markup=get_main_menu(),
-    )
+    try:
+        await ensure_user(message)
+    except Exception:
+        logger.exception("Failed to register Telegram user")
 
-
-@router.message(F.text == "Channel Management")
-async def channel_management_handler(message: Message) -> None:
-    """Open channel management menu."""
-    await message.answer(
-        "📢 <b>Channel Management</b>\n\nSelect an option:",
-        reply_markup=get_channel_management_menu(),
-        parse_mode="HTML",
-    )
-
-
-@router.message(F.text == "➕ Add Channel")
-async def add_channel_placeholder(message: Message) -> None:
-    """Explain the next step for channel registration."""
-    if message.from_user is None or message.from_user.id != OWNER_ID:
-        await message.answer("Only the bot owner can add channels.")
-        return
-
-    await message.answer(
-        "➕ Add Channel\n\n"
-        "Channel registration workflow abhi connect nahi hua hai. "
-        "Is button se abhi database mein channel add nahi hota."
-    )
-
-
-@router.message(F.text == "📋 List Channels")
-async def list_channels_placeholder(message: Message) -> None:
-    """Explain that database listing must be connected."""
-    await message.answer(
-        "📋 Channel List\n\n"
-        "Database listing workflow abhi is file mein connect nahi hai."
-    )
-
-
-@router.message(F.text == "⏸ Deactivate Channel")
-async def deactivate_channel_placeholder(message: Message) -> None:
-    """Explain that channel deactivation must be connected."""
-    if message.from_user is None or message.from_user.id != OWNER_ID:
-        await message.answer("Only the bot owner can deactivate channels.")
-        return
-
-    await message.answer(
-        "Channel deactivate karne ka database workflow abhi connect nahi hai."
-    )
-
-
-@router.message(F.text == "▶️ Reactivate Channel")
-async def reactivate_channel_placeholder(message: Message) -> None:
-    """Explain that channel reactivation must be connected."""
-    if message.from_user is None or message.from_user.id != OWNER_ID:
-        await message.answer("Only the bot owner can reactivate channels.")
-        return
-
-    await message.answer(
-        "Channel reactivate karne ka database workflow abhi connect nahi hai."
-    )
-
-
-@router.message(F.text == "Reaction Management")
-async def reaction_management_handler(message: Message) -> None:
-    """Open reaction management menu."""
-    await message.answer(
-        "❤️ <b>Reaction Management</b>\n\nSelect an option:",
-        reply_markup=get_reaction_menu(),
-        parse_mode="HTML",
-    )
-
-
-@router.message(F.text == "Service Reaction")
-async def service_reaction_handler(message: Message) -> None:
-    """Open service reaction menu."""
-    await message.answer(
-        "👥 <b>Service Reaction</b>\n\nSelect an option:",
-        reply_markup=get_service_reaction_menu(),
-        parse_mode="HTML",
-    )
-
-
-@router.message(F.text == "Channel Reaction")
-async def channel_reaction_handler(message: Message) -> None:
-    """Open channel reaction menu."""
-    await message.answer(
-        "📊 <b>Channel Reaction</b>\n\nSelect an option:",
-        reply_markup=get_channel_reaction_menu(),
-        parse_mode="HTML",
-    )
-
-
-@router.message(F.text == "📋 List Reaction Accounts")
-async def list_reaction_accounts_handler(message: Message) -> None:
-    """Show the current implementation status."""
-    await message.answer(
-        "📋 Reaction Accounts\n\n"
-        "Account database listing abhi implement nahi hui hai."
-    )
-
-
-@router.message(F.text == "➕ Set Reaction Quantity")
-async def set_reaction_quantity_handler(message: Message) -> None:
-    """Show the current implementation status."""
-    await message.answer(
-        "Reaction quantity save karne ka workflow abhi implement nahi hai."
-    )
-
-
-@router.message(F.text == "▶️ Start Reaction Service")
-async def start_reaction_service_handler(message: Message) -> None:
-    """Show the current implementation status."""
-    await message.answer(
-        "Reaction service abhi start nahi hui hai. "
-        "Is button se automatic reactions generate nahi hote."
-    )
-
-
-@router.message(F.text == "⏹ Stop Reaction Service")
-async def stop_reaction_service_handler(message: Message) -> None:
-    """Show the current implementation status."""
-    await message.answer(
-        "Reaction service status integration abhi implement nahi hai."
-    )
-
-
-@router.message(F.text == "⬅️ Back to Reaction Menu")
-async def back_to_reaction_menu_handler(message: Message) -> None:
-    """Return to the reaction menu."""
-    await message.answer(
-        "❤️ Reaction Management\n\nSelect an option:",
-        reply_markup=get_reaction_menu(),
-    )
-
-
-@router.message(F.text.in_({"🏠 Back to Main Menu", "⬅️ Back to Main Menu"}))
-async def back_to_main_menu_handler(message: Message) -> None:
-    """Return to the main menu."""
-    await message.answer(
-        "🏠 Main Menu\n\nChoose an option:",
-        reply_markup=get_main_menu(),
-    )
-
-
-@router.message(F.text == "Account Management")
-async def account_management_handler(message: Message) -> None:
-    """Open account management."""
-    await message.answer(
-        "👤 <b>Account Management</b>\n\n"
-        "Account registration aur secure session management "
-        "abhi connect nahi hai.",
-        parse_mode="HTML",
-    )
-
-
-@router.message(F.text == "Reports/Analytics")
-async def reports_handler(message: Message) -> None:
-    """Open reports."""
-    await message.answer(
-        "📈 <b>Reports/Analytics</b>\n\n"
-        "Actual database reports abhi connect nahi hui hain.",
-        parse_mode="HTML",
-    )
-
-
-@router.message(F.text == "Live Stream Management")
-async def live_stream_handler(message: Message) -> None:
-    """Open live stream management."""
-    await message.answer(
-        "🔴 <b>Live Stream Management</b>\n\n"
-        "Monitoring aur session controls abhi connect nahi hain.",
-        parse_mode="HTML",
-    )
-
-
-@router.message(F.text == "Admin Permissions")
-async def admin_permissions_handler(message: Message) -> None:
-    """Restrict the admin menu to the owner."""
-    if message.from_user is None or message.from_user.id != OWNER_ID:
         await message.answer(
-            "Sorry, only the bot owner can access this menu."
+            "Database se connect karne mein problem hui. "
+            "Please thodi der baad try karein."
         )
         return
 
     await message.answer(
-        "🛡️ <b>Admin Permissions</b>\n\n"
-        "Admin management database workflow abhi connect nahi hai.",
-        parse_mode="HTML",
+        "Welcome! Telegram Admin Bot mein aapka swagat hai.",
+        reply_markup=get_main_menu(),
     )
 
 
-async def register_handlers(dispatcher) -> None:
-    """Register all bot handlers."""
+# -------------------- MAIN MENU --------------------
+
+@router.message(F.text == "📡 Channel Management")
+async def channel_management_handler(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    await message.answer(
+        "📡 Channel Management\n\nEk option select karein:",
+        reply_markup=get_channel_management_menu(),
+    )
+
+
+@router.message(F.text == "⬅️ Back to Main Menu")
+async def back_to_main_menu(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    await message.answer(
+        "Main Menu",
+        reply_markup=get_main_menu(),
+    )
+
+
+# -------------------- ADD CHANNEL --------------------
+
+@router.message(F.text == "➕ Add Channel")
+async def add_channel_start(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_owner(message):
+        await message.answer("⛔ Ye action sirf bot owner kar sakta hai.")
+        return
+
+    await state.clear()
+    await state.set_state(AddChannelStates.title)
+
+    await message.answer(
+        "➕ Add Channel\n\n"
+        "Channel ka title bhejein.\n"
+        "Example: My Updates Channel\n\n"
+        "Cancel karne ke liye /cancel bhejein."
+    )
+
+
+@router.message(AddChannelStates.title, F.text)
+async def add_channel_title(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_owner(message):
+        await state.clear()
+        await message.answer("⛔ Access denied.")
+        return
+
+    title = message.text.strip()
+
+    if not title or len(title) > 255:
+        await message.answer(
+            "Valid title bhejein (1 se 255 characters)."
+        )
+        return
+
+    await state.update_data(channel_title=title)
+    await state.set_state(AddChannelStates.username_or_link)
+
+    await message.answer(
+        "Ab channel ka username ya public link bhejein.\n\n"
+        "Examples:\n"
+        "@mychannel\n"
+        "https://t.me/mychannel\n\n"
+        "Agar username/link nahi hai to - bhejein."
+    )
+
+
+@router.message(AddChannelStates.username_or_link, F.text)
+async def add_channel_save(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_owner(message):
+        await state.clear()
+        await message.answer("⛔ Access denied.")
+        return
+
+    value = message.text.strip()
+    data = await state.get_data()
+    title = data.get("channel_title")
+
+    if not title:
+        await state.clear()
+        await message.answer(
+            "Channel title nahi mila. Please dobara Add Channel karein."
+        )
+        return
+
+    username = None
+    chat_link = None
+
+    if value != "-":
+        if value.startswith("@"):
+            username = value[1:].strip()
+        elif value.startswith("https://t.me/"):
+            chat_link = value
+            username = value.removeprefix(
+                "https://t.me/"
+            ).split("/")[0].split("?")[0]
+            if not username:
+                username = None
+        else:
+            await message.answer(
+                "Username @mychannel format mein ya "
+                "https://t.me/mychannel link bhejein. "
+                "Agar nahi hai to - bhejein."
+            )
+            return
+
+    try:
+        user_id = await ensure_user(message)
+
+        async with SessionFactory() as session:
+            channel = await create_channel(
+                session=session,
+                title=title,
+                username=username,
+                chat_link=chat_link,
+                chat_type="channel",
+                created_by_user_id=user_id,
+            )
+
+        await state.clear()
+
+        await message.answer(
+            "✅ Channel database mein save ho gaya!\n\n"
+            f"{format_channel(channel)}",
+            reply_markup=get_channel_management_menu(),
+        )
+
+    except Exception:
+        logger.exception("Failed to save channel")
+        await state.clear()
+
+        await message.answer(
+            "❌ Channel save nahi ho saka.\n"
+            "Railway logs aur database connection check karein.",
+            reply_markup=get_channel_management_menu(),
+        )
+
+
+# -------------------- LIST CHANNELS --------------------
+
+@router.message(F.text == "📋 List Channels")
+async def list_channels_handler(message: Message):
+    if not is_owner(message):
+        await message.answer("⛔ Ye action sirf bot owner kar sakta hai.")
+        return
+
+    try:
+        async with SessionFactory() as session:
+            channels = await list_channels(
+                session=session,
+                active_only=False,
+            )
+
+        if not channels:
+            await message.answer(
+                "Abhi database mein koi channel registered nahi hai.",
+                reply_markup=get_channel_management_menu(),
+            )
+            return
+
+        output = ["📋 Registered Channels\n"]
+
+        for channel in channels:
+            output.append(format_channel(channel))
+            output.append("--------------------")
+
+        text = "\n".join(output)
+
+        # Telegram messages have a maximum length; send in chunks.
+        for start in range(0, len(text), 3500):
+            await message.answer(
+                text[start:start + 3500],
+                reply_markup=get_channel_management_menu(),
+            )
+
+    except Exception:
+        logger.exception("Failed to list channels")
+        await message.answer(
+            "❌ Channels load nahi ho sake. Railway logs check karein."
+        )
+
+
+# -------------------- DEACTIVATE CHANNEL --------------------
+
+@router.message(F.text == "⏸️ Deactivate Channel")
+async def deactivate_channel_start(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_owner(message):
+        await message.answer("⛔ Ye action sirf bot owner kar sakta hai.")
+        return
+
+    await state.clear()
+    await state.set_state(ChannelActionStates.deactivate_id)
+
+    await message.answer(
+        "Deactivate karne ke liye channel ka database ID bhejein.\n"
+        "ID List Channels mein mil jayegi.\n"
+        "Cancel: /cancel"
+    )
+
+
+@router.message(ChannelActionStates.deactivate_id, F.text)
+async def deactivate_channel_confirm(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_owner(message):
+        await state.clear()
+        await message.answer("⛔ Access denied.")
+        return
+
+    try:
+        channel_id = int(message.text.strip())
+        async with SessionFactory() as session:
+            success = await deactivate_channel(session, channel_id)
+
+        await state.clear()
+
+        if success:
+            await message.answer(
+                f"✅ Channel ID {channel_id} deactivate ho gaya.",
+                reply_markup=get_channel_management_menu(),
+            )
+        else:
+            await message.answer(
+                "❌ Is ID ka channel nahi mila.",
+                reply_markup=get_channel_management_menu(),
+            )
+
+    except ValueError:
+        await message.answer("Sirf numeric channel ID bhejein.")
+    except Exception:
+        logger.exception("Failed to deactivate channel")
+        await state.clear()
+        await message.answer("❌ Deactivation fail hua. Logs check karein.")
+
+
+# -------------------- REACTIVATE CHANNEL --------------------
+
+@router.message(F.text == "▶️ Reactivate Channel")
+async def reactivate_channel_start(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_owner(message):
+        await message.answer("⛔ Ye action sirf bot owner kar sakta hai.")
+        return
+
+    await state.clear()
+    await state.set_state(ChannelActionStates.reactivate_id)
+
+    await message.answer(
+        "Reactivate karne ke liye channel ka database ID bhejein.\n"
+        "ID List Channels mein mil jayegi.\n"
+        "Cancel: /cancel"
+    )
+
+
+@router.message(ChannelActionStates.reactivate_id, F.text)
+async def reactivate_channel_confirm(
+    message: Message,
+    state: FSMContext,
+):
+    if not is_owner(message):
+        await state.clear()
+        await message.answer("⛔ Access denied.")
+        return
+
+    try:
+        channel_id = int(message.text.strip())
+
+        async with SessionFactory() as session:
+            channel = await get_channel(session, channel_id)
+
+            if channel is not None:
+                channel.is_active = True
+                await session.commit()
+                await session.refresh(channel)
+
+        await state.clear()
+
+        if channel is None:
+            await message.answer(
+                "❌ Is ID ka channel nahi mila.",
+                reply_markup=get_channel_management_menu(),
+            )
+        else:
+            await message.answer(
+                f"✅ Channel ID {channel_id} reactivate ho gaya.",
+                reply_markup=get_channel_management_menu(),
+            )
+
+    except ValueError:
+        await message.answer("Sirf numeric channel ID bhejein.")
+    except Exception:
+        logger.exception("Failed to reactivate channel")
+        await state.clear()
+        await message.answer("❌ Reactivation fail hua. Logs check karein.")
+
+
+# -------------------- CANCEL --------------------
+
+@router.message(F.text == "/cancel")
+async def cancel_handler(
+    message: Message,
+    state: FSMContext,
+):
+    await state.clear()
+    await message.answer(
+        "Current action cancel kar diya gaya.",
+        reply_markup=get_channel_management_menu(),
+    )
+
+
+# -------------------- OTHER MENU OPTIONS --------------------
+
+@router.message(F.text == "😀 Reaction Management")
+async def reaction_management_handler(message: Message):
+    await message.answer(
+        "Reaction Management abhi connect nahi hua hai.",
+        reply_markup=get_reaction_menu(),
+    )
+
+
+@router.message(F.text == "👤 Account Management")
+async def account_management_handler(message: Message):
+    await message.answer(
+        "Account Management abhi connect nahi hua hai.",
+        reply_markup=get_main_menu(),
+    )
+
+
+@router.message(F.text == "📊 Reports/Analytics")
+async def reports_handler(message: Message):
+    await message.answer(
+        "Reports/Analytics abhi connect nahi hua hai.",
+        reply_markup=get_main_menu(),
+    )
+
+
+@router.message(F.text == "🔴 Live Stream Management")
+async def live_stream_handler(message: Message):
+    await message.answer(
+        "Live Stream Management abhi connect nahi hua hai.",
+        reply_markup=get_main_menu(),
+    )
+
+
+@router.message(F.text == "🔐 Admin Permissions")
+async def admin_permissions_handler(message: Message):
+    if not is_owner(message):
+        await message.answer("⛔ Ye action sirf bot owner kar sakta hai.")
+        return
+
+    await message.answer(
+        "Admin Permissions abhi connect nahi hua hai.",
+        reply_markup=get_main_menu(),
+    )
+
+
+# -------------------- REGISTER --------------------
+
+def register_handlers(dispatcher):
     dispatcher.include_router(router)
-    logger.info("Bot handlers registered.")
