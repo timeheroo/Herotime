@@ -1,154 +1,94 @@
 
-"""Telegram bot command and menu handlers."""
+"""Telegram bot command and menu handlers using Aiogram."""
 
 import logging
 
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from aiogram import Router
+from aiogram.filters import CommandStart
+from aiogram.types import Message, ReplyKeyboardMarkup
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
-from bot.keyboards import get_main_menu, get_back_keyboard
 from config import OWNER_ID
 
 logger = logging.getLogger(__name__)
 
+router = Router()
 
-# -------------------------
-# Start command
-# -------------------------
+MENU_BUTTONS = [
+    "Channel Management",
+    "Reaction Management",
+    "Account Management",
+    "Reports/Analytics",
+    "Live Stream Management",
+    "Admin Permissions",
+]
 
-@Client.on_message(filters.command("start") & filters.private)
-async def start_handler(client: Client, message: Message) -> None:
-    """Welcome the user and display the main menu."""
-    user = message.from_user
 
-    if user is None:
+def get_main_menu() -> ReplyKeyboardMarkup:
+    """Build the main menu keyboard."""
+    builder = ReplyKeyboardBuilder()
+
+    for button_text in MENU_BUTTONS:
+        builder.button(text=button_text)
+
+    builder.adjust(2)
+
+    return builder.as_markup(
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+@router.message(CommandStart())
+async def start_handler(message: Message) -> None:
+    """Respond to /start with the main menu."""
+    if message.from_user is None:
         return
 
-    if user.id == OWNER_ID:
-        greeting = "Welcome, Owner! 👋"
+    await message.answer(
+        "Welcome! Telegram Management Bot is running.\n\n"
+        "Choose an option from the menu below.",
+        reply_markup=get_main_menu(),
+    )
+
+
+@router.message()
+async def menu_handler(message: Message) -> None:
+    """Handle the main menu buttons."""
+    if not message.text:
+        return
+
+    text = message.text.strip()
+
+    if text == "Channel Management":
+        response = "Channel Management\n\nChannel management features are being prepared."
+
+    elif text == "Reaction Management":
+        response = "Reaction Management\n\nView and configure permitted reaction settings."
+
+    elif text == "Account Management":
+        response = "Account Management\n\nAccount registration features are being prepared."
+
+    elif text == "Reports/Analytics":
+        response = "Reports/Analytics\n\nReports will show recorded data only."
+
+    elif text == "Live Stream Management":
+        response = "Live Stream Management\n\nMonitoring features are being prepared."
+
+    elif text == "Admin Permissions":
+        if message.from_user is None or message.from_user.id != OWNER_ID:
+            await message.answer("Sorry, only the bot owner can access this menu.")
+            return
+
+        response = "Admin Permissions\n\nAdmin permission management is being prepared."
+
     else:
-        greeting = "Welcome! 👋"
-
-    await message.reply_text(
-        f"{greeting}\n\n"
-        "Telegram Management System\n\n"
-        "Choose an option from the menu below:",
-        reply_markup=get_main_menu(),
-    )
-
-
-# -------------------------
-# Main menu handlers
-# -------------------------
-
-@Client.on_message(
-    filters.private & filters.regex(r"^📢 Channel Management$")
-)
-async def channel_menu_handler(
-    client: Client,
-    message: Message,
-) -> None:
-    await message.reply_text(
-        "📢 Channel Management\n\n"
-        "Channel listing and management features will be connected here.",
-        reply_markup=get_back_keyboard(),
-    )
-
-
-@Client.on_message(
-    filters.private & filters.regex(r"^❤️ Reaction Management$")
-)
-async def reaction_menu_handler(
-    client: Client,
-    message: Message,
-) -> None:
-    await message.reply_text(
-        "❤️ Reaction Management\n\n"
-        "View and manage saved reaction preferences here. "
-        "This menu does not generate artificial reactions.",
-        reply_markup=get_back_keyboard(),
-    )
-
-
-@Client.on_message(
-    filters.private & filters.regex(r"^🔑 Account Management$")
-)
-async def account_menu_handler(
-    client: Client,
-    message: Message,
-) -> None:
-    await message.reply_text(
-        "🔑 Account Management\n\n"
-        "Account registration and status management will be connected here. "
-        "Sensitive credentials must never be displayed in chat.",
-        reply_markup=get_back_keyboard(),
-    )
-
-
-@Client.on_message(
-    filters.private & filters.regex(r"^📊 Reports / Analytics$")
-)
-async def reports_menu_handler(
-    client: Client,
-    message: Message,
-) -> None:
-    await message.reply_text(
-        "📊 Reports / Analytics\n\n"
-        "Choose a reporting period:",
-        reply_markup=get_back_keyboard(),
-    )
-
-
-@Client.on_message(
-    filters.private & filters.regex(r"^📡 Live Stream Management$")
-)
-async def live_menu_handler(
-    client: Client,
-    message: Message,
-) -> None:
-    await message.reply_text(
-        "📡 Live Stream Management\n\n"
-        "Monitoring status and configured targets will be shown here. "
-        "Configured targets are not actual viewer counts.",
-        reply_markup=get_back_keyboard(),
-    )
-
-
-@Client.on_message(
-    filters.private & filters.regex(r"^👤 Admin Permissions$")
-)
-async def admin_menu_handler(
-    client: Client,
-    message: Message,
-) -> None:
-    user = message.from_user
-
-    if user is None or user.id != OWNER_ID:
-        await message.reply_text(
-            "⛔ Only the owner can access admin permission management."
-        )
         return
 
-    await message.reply_text(
-        "👤 Admin Permissions\n\n"
-        "Admin promotion and individual permission controls "
-        "will be connected here.",
-        reply_markup=get_back_keyboard(),
-    )
+    await message.answer(response)
 
 
-# -------------------------
-# Return to main menu
-# -------------------------
-
-@Client.on_message(
-    filters.private & filters.regex(r"^⬅️ Main Menu$")
-)
-async def back_to_menu_handler(
-    client: Client,
-    message: Message,
-) -> None:
-    await message.reply_text(
-        "Main menu:",
-        reply_markup=get_main_menu(),
-    )
+async def register_handlers(dispatcher) -> None:
+    """Register the bot router with the dispatcher."""
+    dispatcher.include_router(router)
+    logger.info("Bot handlers registered.")
