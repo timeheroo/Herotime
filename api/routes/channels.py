@@ -1,176 +1,133 @@
-"""API endpoints for channel management."""
 
-from typing import Annotated, Literal
+"""Channel management API routes."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.dependencies import (
-DatabaseSession,
-get_authenticated_user,
-require_permission,
-)
-from database.models import Channel, User
+from database.connection import get_session
+from database.models import Channel
 
 router = APIRouter(prefix="/channels", tags=["Channels"])
 
+
 class ChannelCreate(BaseModel):
-telegram_chat_id: int | None = None
-title: str = Field(min_length=1, max_length=255)
-username: str | None = Field(default=None, max_length=255)
-chat_link: str | None = Field(default=None, max_length=512)
-chat_type: Literal["channel", "group", "supergroup"] = "channel"
+    title: str = Field(min_length=1, max_length=255)
+    username: str | None = Field(default=None, max_length=255)
+    chat_link: str | None = Field(default=None, max_length=500)
+    chat_type: str = Field(default="channel", pattern="^(channel|group|supergroup)$")
+
 
 class ChannelResponse(BaseModel):
-model_config = ConfigDict(from_attributes=True)
+    id: int
+    title: str
+    username: str | None
+    chat_link: str | None
+    chat_type: str
+    is_active: bool
 
-```
-id: int
-telegram_chat_id: int | None
-username: str | None
-title: str
-chat_link: str | None
-chat_type: str
-is_active: bool
-```
+    model_config = {"from_attributes": True}
+
+
+@router.post("", response_model=ChannelResponse, status_code=201)
+async def add_channel(
+    payload: ChannelCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Register a channel by its supplied details."""
+    username = payload.username.strip().lstrip("@") if payload.username else None
+    link = payload.chat_link.strip() if payload.chat_link else None
+    title = payload.title.strip()
+
+    if not title:
+        raise HTTPException(status_code=422, detail="Title cannot be empty.")
+
+    if username:
+        result = await session.execute(
+            select(Channel).where(Channel.username == username)
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail="A channel with this username is already registered.",
+            )
+
+    channel = Channel(
+        title=title,
+        username=username,
+        chat_link=link,
+        chat_type=payload.chat_type,
+        is_active=True,
+    )
+
+    session.add(channel)
+
+    try:
+        await session.commit()
+        await session.refresh(channel)
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Channel conflicts with an existing database record.",
+        )
+
+    return channel
+
 
 @router.get("", response_model=list[ChannelResponse])
 async def list_channels(
-session: DatabaseSession,
-user: Annotated[User, Depends(get_authenticated_user)],
-include_inactive: bool = Query(default=False),
+    active_only: bool = Query(default=False),
+    session: AsyncSession = Depends(get_session),
 ):
-"""List channels; optionally include deactivated channels."""
-query = select(Channel).order_by(Channel.id.desc())
+    """List registered channels."""
+    statement = select(Channel).order_by(Channel.id.desc())
 
-```
-if not include_inactive:
-    query = query.where(Channel.is_active.is_(True))
+    if active_only:
+        statement = statement.where(Channel.is_active.is_(True))
 
-result = await session.execute(query)
-return result.scalars().all()
-```
+    result = await session.execute(statement)
+    return list(result.scalars().all())
 
-@router.post(
-"",
-response_model=ChannelResponse,
-status_code=status.HTTP_201_CREATED,
-)
-async def create_channel(
-payload: ChannelCreate,
-session: DatabaseSession,
-user: Annotated[User, Depends(require_permission("channels.manage"))],
+
+@router.patch("/{channel_id}/deactivate", response_model=ChannelResponse)
+async def deactivate_channel(
+    channel_id: int,
+    session: AsyncSession = Depends(get_session),
 ):
-"""Register a channel record."""
-username = payload.username.strip().lstrip("@") if payload.username else None
-chat_link = payload.chat_link.strip() if payload.chat_link else None
-title = payload.title.strip()
-
-```
-if not title:
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail="Channel title cannot be empty.",
-    )
-
-if payload.telegram_chat_id is None and not username and not chat_link:
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail="Provide telegram_chat_id, username, or chat_link.",
-    )
-
-if payload.telegram_chat_id is not None:
+    """Deactivate a registered channel."""
     result = await session.execute(
-        select(Channel).where(
-            Channel.telegram_chat_id == payload.telegram_chat_id
-        )
+        select(Channel).where(Channel.id == channel_id)
     )
-    existing = result.scalar_one_or_none()
+    channel = result.scalar_one_or_none()
 
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A channel with this Telegram chat ID already exists.",
-        )
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found.")
 
-channel = Channel(
-    telegram_chat_id=payload.telegram_chat_id,
-    title=title,
-    username=username,
-    chat_link=chat_link,
-    chat_type=payload.chat_type,
-    created_by_user_id=user.id,
-    is_active=True,
-)
-
-session.add(channel)
-
-try:
+    channel.is_active = False
     await session.commit()
     await session.refresh(channel)
-except IntegrityError as exc:
-    await session.rollback()
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail="A conflicting channel record already exists.",
-    ) from exc
+    return channel
 
-return channel
-```
 
-@router.delete("/{channel_id}", status_code=status.HTTP_200_OK)
-async def deactivate_channel(
-channel_id: int,
-session: DatabaseSession,
-user: Annotated[User, Depends(require_permission("channels.manage"))],
+@router.patch("/{channel_id}/reactivate", response_model=ChannelResponse)
+async def reactivate_channel(
+    channel_id: int,
+    session: AsyncSession = Depends(get_session),
 ):
-"""Deactivate a channel without permanently deleting its record."""
-result = await session.execute(
-select(Channel).where(Channel.id == channel_id)
-)
-channel = result.scalar_one_or_none()
-
-```
-if channel is None:
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Channel not found.",
+    """Reactivate a registered channel."""
+    result = await session.execute(
+        select(Channel).where(Channel.id == channel_id)
     )
+    channel = result.scalar_one_or_none()
 
-channel.is_active = False
-await session.commit()
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found.")
 
-return {
-    "success": True,
-    "message": "Channel deactivated.",
-    "channel_id": channel.id,
-}
-```
-
-@router.patch("/{channel_id}/activate", response_model=ChannelResponse)
-async def activate_channel(
-channel_id: int,
-session: DatabaseSession,
-user: Annotated[User, Depends(require_permission("channels.manage"))],
-):
-"""Reactivate a previously deactivated channel."""
-result = await session.execute(
-select(Channel).where(Channel.id == channel_id)
-)
-channel = result.scalar_one_or_none()
-
-```
-if channel is None:
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Channel not found.",
-    )
-
-channel.is_active = True
-await session.commit()
-await session.refresh(channel)
-
-return channel
-```
+    channel.is_active = True
+    await session.commit()
+    await session.refresh(channel)
+    return channel
