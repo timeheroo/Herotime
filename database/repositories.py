@@ -15,9 +15,7 @@ from database.models import (
 )
 
 
-# -------------------------
 # Users
-# -------------------------
 
 async def get_user_by_telegram_id(
     session: AsyncSession,
@@ -40,24 +38,23 @@ async def create_user(
     if user is not None:
         user.username = username
         user.display_name = display_name
-        await session.commit()
-        await session.refresh(user)
-        return user
+    else:
+        user = User(
+            telegram_id=telegram_id,
+            username=username,
+            display_name=display_name,
+            role="admin" if telegram_id == __import__(
+                "config"
+            ).OWNER_ID else "user",
+        )
+        session.add(user)
 
-    user = User(
-        telegram_id=telegram_id,
-        username=username,
-        display_name=display_name,
-    )
-    session.add(user)
     await session.commit()
     await session.refresh(user)
     return user
 
 
-# -------------------------
 # Channels
-# -------------------------
 
 async def list_channels(
     session: AsyncSession,
@@ -100,8 +97,14 @@ async def create_channel(
         created_by_user_id=created_by_user_id,
     )
     session.add(channel)
-    await session.commit()
-    await session.refresh(channel)
+
+    try:
+        await session.commit()
+        await session.refresh(channel)
+    except Exception:
+        await session.rollback()
+        raise
+
     return channel
 
 
@@ -115,13 +118,37 @@ async def deactivate_channel(
         return False
 
     channel.is_active = False
-    await session.commit()
+
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+
     return True
 
 
-# -------------------------
+async def reactivate_channel(
+    session: AsyncSession,
+    channel_id: int,
+) -> bool:
+    channel = await get_channel(session, channel_id)
+
+    if channel is None:
+        return False
+
+    channel.is_active = True
+
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+
+    return True
+
+
 # Telegram account metadata
-# -------------------------
 
 async def list_accounts(
     session: AsyncSession,
@@ -138,9 +165,7 @@ async def list_accounts(
     return list(result.scalars().all())
 
 
-# -------------------------
 # Admin permissions
-# -------------------------
 
 async def get_admin_permissions(
     session: AsyncSession,
@@ -154,9 +179,7 @@ async def get_admin_permissions(
     return list(result.scalars().all())
 
 
-# -------------------------
 # Reaction configuration
-# -------------------------
 
 async def list_reaction_configs(
     session: AsyncSession,
@@ -170,9 +193,7 @@ async def list_reaction_configs(
     return list(result.scalars().all())
 
 
-# -------------------------
 # Monitoring history
-# -------------------------
 
 async def list_monitoring_sessions(
     session: AsyncSession,
@@ -190,9 +211,7 @@ async def list_monitoring_sessions(
     return list(result.scalars().all())
 
 
-# -------------------------
 # Observed analytics
-# -------------------------
 
 async def list_analytics(
     session: AsyncSession,
