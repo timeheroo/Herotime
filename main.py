@@ -4,11 +4,16 @@
 import asyncio
 import logging
 
-from pyrogram import Client, idle
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
-from config import API_HASH, API_ID, BOT_TOKEN
-from database.connection import close_database, create_tables, init_database
-
+from config import BOT_TOKEN
+from database.connection import (
+    close_database,
+    create_tables,
+    init_database,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,16 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    """Initialize the database and start the Telegram bot."""
-
-    bot = Client(
-        name="management_bot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN,
-        in_memory=True,
-        no_updates=False,
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    dispatcher = Dispatcher()
 
     try:
         logger.info("Checking PostgreSQL connection...")
@@ -37,20 +37,16 @@ async def main() -> None:
         logger.info("Creating database tables...")
         await create_tables()
 
+        # Handlers will be registered with Aiogram in the next step.
         logger.info("Starting Telegram bot...")
-        await bot.start()
-
-        logger.info("Telegram bot started successfully.")
-        await idle()
+        await dispatcher.start_polling(bot)
 
     except Exception:
         logger.exception("Application startup or runtime failed.")
         raise
 
     finally:
-        if getattr(bot, "is_connected", False):
-            await bot.stop()
-
+        await bot.session.close()
         await close_database()
         logger.info("Application stopped.")
 
