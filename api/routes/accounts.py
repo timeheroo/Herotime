@@ -1,16 +1,22 @@
 
-"""Telegram account metadata management API."""
+"""Authenticated Telegram account metadata management API."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.connection import get_session
-from database.models import TelegramAccount
+from api.dependencies import DatabaseSession, require_permission
+from database.models import TelegramAccount, User
 
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
+
+AccountManager = Annotated[
+    User,
+    Depends(require_permission("account_management")),
+]
 
 
 class AccountCreate(BaseModel):
@@ -38,14 +44,23 @@ class AccountResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-@router.post("", response_model=AccountResponse, status_code=201)
+@router.post(
+    "",
+    response_model=AccountResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def add_account(
     payload: AccountCreate,
-    session: AsyncSession = Depends(get_session),
+    _user: AccountManager,
+    session: DatabaseSession,
 ):
     """Register account metadata, not a Telegram login session."""
     label = payload.label.strip()
-    username = payload.username.strip().lstrip("@") if payload.username else None
+    username = (
+        payload.username.strip().lstrip("@")
+        if payload.username
+        else None
+    )
     secret_reference = (
         payload.secret_reference.strip()
         if payload.secret_reference
@@ -53,7 +68,10 @@ async def add_account(
     )
 
     if not label:
-        raise HTTPException(status_code=422, detail="Label cannot be empty.")
+        raise HTTPException(
+            status_code=422,
+            detail="Label cannot be empty.",
+        )
 
     account = TelegramAccount(
         label=label,
@@ -67,49 +85,62 @@ async def add_account(
     try:
         await session.commit()
         await session.refresh(account)
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
             status_code=409,
             detail="Account conflicts with an existing record.",
-        )
+        ) from exc
 
     return account
 
 
 @router.get("", response_model=list[AccountResponse])
 async def list_accounts(
+    _user: AccountManager,
     active_only: bool = True,
-    session: AsyncSession = Depends(get_session),
+    session: DatabaseSession = None,
 ):
     """List account metadata without exposing secret references."""
-    statement = select(TelegramAccount).order_by(TelegramAccount.id.desc())
+    statement = select(TelegramAccount).order_by(
+        TelegramAccount.id.desc()
+    )
 
     if active_only:
-        statement = statement.where(TelegramAccount.is_active.is_(True))
+        statement = statement.where(
+            TelegramAccount.is_active.is_(True)
+        )
 
     result = await session.execute(statement)
     return list(result.scalars().all())
 
 
-@router.patch("/{account_id}/rename", response_model=AccountResponse)
+@router.patch(
+    "/{account_id}/rename",
+    response_model=AccountResponse,
+)
 async def rename_account(
     account_id: int,
     payload: AccountRename,
-    session: AsyncSession = Depends(get_session),
+    _user: AccountManager,
+    session: DatabaseSession,
 ):
     """Change the display label for an account."""
     label = payload.label.strip()
-    if not label:
-        raise HTTPException(status_code=422, detail="Label cannot be empty.")
 
-    result = await session.execute(
-        select(TelegramAccount).where(TelegramAccount.id == account_id)
-    )
-    account = result.scalar_one_or_none()
+    if not label:
+        raise HTTPException(
+            status_code=422,
+            detail="Label cannot be empty.",
+        )
+
+    account = await session.get(TelegramAccount, account_id)
 
     if account is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Account not found.",
+        )
 
     account.label = label
     await session.commit()
@@ -117,19 +148,23 @@ async def rename_account(
     return account
 
 
-@router.patch("/{account_id}/deactivate", response_model=AccountResponse)
+@router.patch(
+    "/{account_id}/deactivate",
+    response_model=AccountResponse,
+)
 async def deactivate_account(
     account_id: int,
-    session: AsyncSession = Depends(get_session),
+    _user: AccountManager,
+    session: DatabaseSession,
 ):
     """Deactivate account metadata without deleting its record."""
-    result = await session.execute(
-        select(TelegramAccount).where(TelegramAccount.id == account_id)
-    )
-    account = result.scalar_one_or_none()
+    account = await session.get(TelegramAccount, account_id)
 
     if account is None:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Account not found.",
+        )
 
     account.is_active = False
     await session.commit()
