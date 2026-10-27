@@ -32,14 +32,19 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+def get_session_factory():
+    """Return the shared async session factory."""
+    return SessionFactory
+
+
 async def init_database() -> None:
-    """Check the database connection."""
+    """Verify PostgreSQL connectivity."""
     async with engine.connect() as connection:
         await connection.execute(text("SELECT 1"))
 
 
 async def create_tables() -> None:
-    """Create tables defined in the SQLAlchemy models."""
+    """Create tables declared in SQLAlchemy models."""
     from database.models import Base
 
     async with engine.begin() as connection:
@@ -47,5 +52,5 @@ async def create_tables() -> None:
 
 
 async def close_database() -> None:
-    """Dispose of the database connection pool."""
+    """Close the database connection pool."""
     await engine.dispose()
