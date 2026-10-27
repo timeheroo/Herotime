@@ -1,20 +1,29 @@
 
-"""Reports and analytics API."""
+"""Authenticated reports and analytics API."""
 
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.connection import get_session
-from database.models import AnalyticsRecord, Channel
+from api.dependencies import DatabaseSession, require_permission
+from database.models import AnalyticsRecord, Channel, User
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
 ReportPeriod = Literal["24h", "72h", "1d", "1w", "1m"]
+
+ReportViewer = Annotated[
+    User,
+    Depends(require_permission("reports_view")),
+]
+
+ReportManager = Annotated[
+    User,
+    Depends(require_permission("reports_manage")),
+]
 
 
 class AnalyticsCreate(BaseModel):
@@ -46,21 +55,38 @@ PERIOD_DAYS = {
 }
 
 
-@router.post("/records", response_model=AnalyticsResponse, status_code=201)
+@router.post(
+    "/records",
+    response_model=AnalyticsResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_analytics_record(
     payload: AnalyticsCreate,
-    session: AsyncSession = Depends(get_session),
+    _user: ReportManager,
+    session: DatabaseSession,
 ):
-    """Record a metric observation."""
+    """Record an observed metric; does not generate synthetic statistics."""
     channel = await session.get(Channel, payload.channel_id)
 
     if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Channel not found.",
+        )
+
+    source = payload.source.strip()
+    metric_name = payload.metric_name.strip()
+
+    if not source or not metric_name:
+        raise HTTPException(
+            status_code=422,
+            detail="Source and metric name cannot be empty.",
+        )
 
     record = AnalyticsRecord(
         channel_id=payload.channel_id,
-        source=payload.source.strip(),
-        metric_name=payload.metric_name.strip(),
+        source=source,
+        metric_name=metric_name,
         metric_value=payload.metric_value,
         details=payload.details,
         observed_at=datetime.now(timezone.utc),
@@ -74,10 +100,13 @@ async def create_analytics_record(
 
 @router.get("", response_model=list[AnalyticsResponse])
 async def get_report(
+    _user: ReportViewer,
     channel_id: int | None = Query(default=None, gt=0),
     period: ReportPeriod = "24h",
     limit: int = Query(default=100, ge=1, le=1000),
-    session: AsyncSession = Depends(get_session),
+    session: DatabaseSession = Depends(
+        __import__("api.dependencies", fromlist=["get_db_session"]).get_db_session
+    ),
 ):
     """Return recorded metrics within the selected period."""
     since = datetime.now(timezone.utc) - timedelta(
@@ -102,11 +131,14 @@ async def get_report(
 
 @router.get("/summary")
 async def get_report_summary(
+    _user: ReportViewer,
     channel_id: int | None = Query(default=None, gt=0),
     period: ReportPeriod = "24h",
-    session: AsyncSession = Depends(get_session),
+    session: DatabaseSession = Depends(
+        __import__("api.dependencies", fromlist=["get_db_session"]).get_db_session
+    ),
 ):
-    """Summarize recorded values without inventing missing metrics."""
+    """Summarize recorded numeric values only."""
     since = datetime.now(timezone.utc) - timedelta(
         days=PERIOD_DAYS[period]
     )
@@ -123,17 +155,17 @@ async def get_report_summary(
     result = await session.execute(statement)
     records = list(result.scalars().all())
 
-    totals = {}
+    totals: dict[str, int] = {}
     for record in records:
-        key = record.metric_name
         if record.metric_value is not None:
-            totals[key] = totals.get(key, 0) + record.metric_value
+            totals[record.metric_name] = (
+                totals.get(record.metric_name, 0)
+                + record.metric_value
+            )
 
     return {
         "period": period,
         "record_count": len(records),
         "totals": totals,
-        "message": (
-            "Summary includes only recorded numeric metric values."
-        ),
+        "message": "Summary includes only recorded numeric metric values.",
     }
