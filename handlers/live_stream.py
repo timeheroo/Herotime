@@ -4,7 +4,6 @@ from telegram.ext import CommandHandler, ContextTypes
 
 from database import get_pool
 from utils.permissions import require_permission
-from utils.validators import validate_quantity
 from utils.logger import log_action
 
 
@@ -12,7 +11,6 @@ async def set_live_target(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Create or update the monitoring target for a channel."""
     user = update.effective_user
     message = update.effective_message
 
@@ -24,36 +22,38 @@ async def set_live_target(
         await message.reply_text(reason)
         return
 
-    if len(context.args) != 2 or not context.args[0].isdigit():
+    if len(context.args) != 2:
         await message.reply_text(
-            "Usage: /setlivetarget CHANNEL_ID QUANTITY\n"
-            "Example: /setlivetarget 1 100"
+            "Usage: /setlivetarget CHANNEL_RECORD_ID QUANTITY"
         )
         return
 
-    channel_id = int(context.args[0])
+    if not context.args[0].isdigit() or not context.args[1].isdigit():
+        await message.reply_text("Dono values positive integer honi chahiye.")
+        return
 
-    try:
-        quantity = validate_quantity(context.args[1])
-    except ValueError as exc:
-        await message.reply_text(str(exc))
+    channel_id = int(context.args[0])
+    quantity = int(context.args[1])
+
+    if quantity < 0 or quantity > 1_000_000:
+        await message.reply_text("Quantity 0 se 1000000 ke beech rakhein.")
         return
 
     pool = await get_pool()
 
     async with pool.acquire() as conn:
         channel = await conn.fetchrow(
-            "SELECT id, is_active FROM channels WHERE id = $1",
+            """
+            SELECT id, title, username
+            FROM channels
+            WHERE id = $1 AND is_active = TRUE
+            """,
             channel_id,
         )
 
         if channel is None:
-            await message.reply_text("Channel ID nahi mila.")
-            return
-
-        if not channel["is_active"]:
             await message.reply_text(
-                "Yeh channel inactive hai. Pehle channel activate karein."
+                "Active channel record nahi mila. /channels se ID check karein."
             )
             return
 
@@ -63,7 +63,6 @@ async def set_live_target(
                 channel_id, target_quantity, status, created_by
             )
             VALUES ($1, $2, 'stopped', $3)
-            ON CONFLICT DO NOTHING
             RETURNING id
             """,
             channel_id,
@@ -71,35 +70,9 @@ async def set_live_target(
             user.id,
         )
 
-        if task_id is None:
-            task_id = await conn.fetchval(
-                """
-                SELECT id FROM live_tasks
-                WHERE channel_id = $1
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                channel_id,
-            )
-
-            if task_id is None:
-                await message.reply_text("Task save nahi ho saka.")
-                return
-
-            await conn.execute(
-                """
-                UPDATE live_tasks
-                SET target_quantity = $2,
-                    updated_at = NOW()
-                WHERE id = $1
-                """,
-                task_id,
-                quantity,
-            )
-
     await log_action(
         user.id,
-        "live_target_updated",
+        "live_task_created",
         {
             "task_id": task_id,
             "channel_id": channel_id,
@@ -108,12 +81,13 @@ async def set_live_target(
     )
 
     await message.reply_text(
-        f"✅ Live monitoring target save ho gaya.\n"
+        "✅ Live task record created.\n\n"
         f"Task ID: {task_id}\n"
         f"Channel ID: {channel_id}\n"
-        f"Target: {quantity}\n"
+        f"Target setting: {quantity}\n"
         "Status: stopped\n\n"
-        "Yeh target setting hai, actual viewer count nahi."
+        "Note: Yeh configuration record hai. Isse actual viewers ya "
+        "live stream start nahi hoti."
     )
 
 
@@ -121,7 +95,6 @@ async def list_live_tasks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Display configured live tasks."""
     user = update.effective_user
     message = update.effective_message
 
@@ -138,27 +111,36 @@ async def list_live_tasks(
     async with pool.acquire() as conn:
         tasks = await conn.fetch(
             """
-            SELECT lt.id, lt.channel_id, lt.target_quantity, lt.status,
-                   c.username
-            FROM live_tasks lt
-            JOIN channels c ON c.id = lt.channel_id
-            ORDER BY lt.id DESC
-            LIMIT 50
+            SELECT t.id, t.channel_id, t.target_quantity,
+                   t.status, t.created_at, c.username, c.title,
+                   c.is_active
+            FROM live_tasks t
+            JOIN channels c ON c.id = t.channel_id
+            ORDER BY t.id DESC
+            LIMIT 30
             """
         )
 
     if not tasks:
-        await message.reply_text("Abhi koi live task configured nahi hai.")
+        await message.reply_text("Abhi koi live task record nahi hai.")
         return
 
-    lines = ["📺 Live Task Settings"]
+    lines = ["🔴 Live Task Records — Latest 30"]
 
     for task in tasks:
+        channel_name = (
+            f"@{task['username']}"
+            if task["username"]
+            else task["title"] or f"Channel {task['channel_id']}"
+        )
+        channel_status = "active" if task["is_active"] else "inactive"
+
         lines.append(
             f"\nTask ID: {task['id']}\n"
-            f"Channel: {task['username'] or task['channel_id']}\n"
-            f"Target: {task['target_quantity']}\n"
-            f"Status: {task['status']}"
+            f"Channel: {channel_name}\n"
+            f"Channel status: {channel_status}\n"
+            f"Target setting: {task['target_quantity']}\n"
+            f"Task status: {task['status']}"
         )
 
     await message.reply_text("\n".join(lines))
@@ -169,7 +151,6 @@ async def set_live_status(
     context: ContextTypes.DEFAULT_TYPE,
     status: str,
 ) -> None:
-    """Set a task's desired status."""
     user = update.effective_user
     message = update.effective_message
 
@@ -182,26 +163,48 @@ async def set_live_status(
         return
 
     if len(context.args) != 1 or not context.args[0].isdigit():
-        command = "/startlive" if status == "running" else "/stoplive"
-        await message.reply_text(f"Usage: {command} TASK_ID")
+        command = "startlive" if status == "running" else "stoplive"
+        await message.reply_text(f"Usage: /{command} TASK_ID")
         return
 
     task_id = int(context.args[0])
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        result = await conn.execute(
+        if status == "running":
+            task = await conn.fetchrow(
+                """
+                SELECT t.id, t.channel_id, c.is_active
+                FROM live_tasks t
+                JOIN channels c ON c.id = t.channel_id
+                WHERE t.id = $1
+                """,
+                task_id,
+            )
+
+            if task is None:
+                await message.reply_text("Live task nahi mila.")
+                return
+
+            if not task["is_active"]:
+                await message.reply_text(
+                    "Channel inactive hai. Pehle channel activate karein."
+                )
+                return
+
+        row = await conn.fetchrow(
             """
             UPDATE live_tasks
-            SET status = $2, updated_at = NOW()
-            WHERE id = $1
+            SET status = $1, updated_at = NOW()
+            WHERE id = $2
+            RETURNING id, channel_id, target_quantity, status
             """,
-            task_id,
             status,
+            task_id,
         )
 
-    if result.endswith("0"):
-        await message.reply_text("Task ID nahi mila.")
+    if row is None:
+        await message.reply_text("Live task nahi mila.")
         return
 
     await log_action(
@@ -210,15 +213,15 @@ async def set_live_status(
         {"task_id": task_id, "status": status},
     )
 
-    if status == "running":
-        await message.reply_text(
-            f"Task {task_id} ka desired status running set hua.\n"
-            "Actual monitoring worker abhi connect nahi hua hai."
-        )
-    else:
-        await message.reply_text(
-            f"Task {task_id} ka status stopped set hua."
-        )
+    await message.reply_text(
+        f"✅ Task record update ho gaya.\n"
+        f"Task ID: {row['id']}\n"
+        f"Channel ID: {row['channel_id']}\n"
+        f"Target setting: {row['target_quantity']}\n"
+        f"Status: {row['status']}\n\n"
+        "Note: Actual live-stream monitoring worker abhi is code se "
+        "start nahi hota."
+    )
 
 
 async def start_live(
