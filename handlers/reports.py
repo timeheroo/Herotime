@@ -1,4 +1,5 @@
 
+import logging
 from datetime import timedelta
 
 from telegram import Update
@@ -7,8 +8,9 @@ from telegram.ext import CommandHandler, ContextTypes
 from database import get_pool
 from utils.permissions import require_permission
 
+logger = logging.getLogger(__name__)
 
-PERIODS = {
+REPORT_WINDOWS = {
     "24h": timedelta(hours=24),
     "72h": timedelta(hours=72),
     "daily": timedelta(days=1),
@@ -17,177 +19,171 @@ PERIODS = {
 }
 
 
-async def report_command(
+async def _authorized(update: Update) -> bool:
+    user = update.effective_user
+    message = update.effective_message
+
+    if user is None or message is None:
+        return False
+
+    allowed, reason = await require_permission(
+        user.id,
+        "view_reports",
+    )
+
+    if not allowed:
+        await message.reply_text(reason)
+        return False
+
+    return True
+
+
+async def report(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-):
-    if not update.effective_user or not update.message:
+) -> None:
+    if not await _authorized(update):
         return
 
-    user_id = update.effective_user.id
+    message = update.effective_message
 
-    allowed, message = await require_permission(
-        user_id, "view_reports"
-    )
-    if not allowed:
-        await update.message.reply_text(message)
-        return
+    period = context.args[0].lower() if context.args else "24h"
 
-    period_name = (
-        context.args[0].lower()
-        if context.args
-        else "daily"
-    )
-
-    if period_name not in PERIODS:
-        await update.message.reply_text(
-            "Usage: /report [24h|72h|daily|weekly|monthly]\n\n"
-            "Examples:\n"
-            "/report daily\n"
+    if period not in REPORT_WINDOWS:
+        await message.reply_text(
+            "Usage:\n"
             "/report 24h\n"
             "/report 72h\n"
+            "/report daily\n"
             "/report weekly\n"
             "/report monthly"
         )
         return
 
-    interval = PERIODS[period_name]
-    pool = await get_pool()
+    try:
+        window = REPORT_WINDOWS[period]
+        pool = await get_pool()
 
-    async with pool.acquire() as conn:
-        channel_count = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM channels
-            WHERE created_at >= NOW() - $1
-            """,
-            interval,
-        )
+        async with pool.acquire() as conn:
+            summary = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM channels
+                     WHERE created_at >= NOW() - $1::interval) AS channels_added,
 
-        live_task_count = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM live_tasks
-            WHERE created_at >= NOW() - $1
-            """,
-            interval,
-        )
+                    (SELECT COUNT(*) FROM api_configs
+                     WHERE created_at >= NOW() - $1::interval) AS api_configs_added,
 
-        reaction_task_count = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM reaction_tasks
-            WHERE created_at >= NOW() - $1
-            """,
-            interval,
-        )
+                    (SELECT COUNT(*) FROM live_tasks
+                     WHERE created_at >= NOW() - $1::interval) AS live_tasks_created,
 
-        account_count = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM accounts
-            WHERE created_at >= NOW() - $1
-            """,
-            interval,
-        )
+                    (SELECT COUNT(*) FROM reaction_tasks
+                     WHERE created_at >= NOW() - $1::interval) AS reaction_tasks_created,
 
-        activity_count = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM activity_logs
-            WHERE created_at >= NOW() - $1
-            """,
-            interval,
-        )
-
-        action_rows = await conn.fetch(
-            """
-            SELECT action, COUNT(*) AS total
-            FROM activity_logs
-            WHERE created_at >= NOW() - $1
-            GROUP BY action
-            ORDER BY total DESC
-            LIMIT 10
-            """,
-            interval,
-        )
-
-    lines = [
-        f"📊 Activity Report: {period_name}",
-        "",
-        f"New channel records: {channel_count}",
-        f"New account records: {account_count}",
-        f"New live task records: {live_task_count}",
-        f"New reaction task records: {reaction_task_count}",
-        f"Logged activities: {activity_count}",
-        "",
-        "Top recorded actions:",
-    ]
-
-    if action_rows:
-        for row in action_rows:
-            lines.append(
-                f"• {row['action']}: {row['total']}"
+                    (SELECT COUNT(*) FROM activity_logs
+                     WHERE created_at >= NOW() - $1::interval) AS actions_logged
+                """,
+                window,
             )
-    else:
-        lines.append("Is period mein koi logged action nahi mila.")
 
-    lines.extend([
-        "",
-        "Note: Yeh database records aur audit logs ki report hai.",
-        "Yeh actual viewers, reactions ya financial spending "
-        "ka measurement nahi hai.",
-    ])
+            live_status = await conn.fetch(
+                """
+                SELECT status, COUNT(*) AS total
+                FROM live_tasks
+                GROUP BY status
+                ORDER BY status
+                """
+            )
 
-    await update.message.reply_text("\n".join(lines))
+            reaction_status = await conn.fetch(
+                """
+                SELECT status, COUNT(*) AS total
+                FROM reaction_tasks
+                GROUP BY status
+                ORDER BY status
+                """
+            )
+
+        live_lines = [
+            f"{row['status']}: {row['total']}"
+            for row in live_status
+        ] or ["No live tasks"]
+
+        reaction_lines = [
+            f"{row['status']}: {row['total']}"
+            for row in reaction_status
+        ] or ["No reaction tasks"]
+
+        await message.reply_text(
+            f"Activity Report — {period}\n\n"
+            f"Channels added: {summary['channels_added']}\n"
+            f"API configurations added: {summary['api_configs_added']}\n"
+            f"Live tasks created: {summary['live_tasks_created']}\n"
+            f"Reaction tasks created: {summary['reaction_tasks_created']}\n"
+            f"Logged actions: {summary['actions_logged']}\n\n"
+            "Current live-task status:\n"
+            + "\n".join(live_lines)
+            + "\n\nCurrent reaction-task status:\n"
+            + "\n".join(reaction_lines)
+            + "\n\nNote: Ye database activity report hai. "
+            "Actual joins, reactions ya spending ka verified count nahi."
+        )
+
+    except Exception:
+        logger.exception("Failed to generate activity report")
+        await message.reply_text(
+            "Report generate nahi ho saki. Server logs check karein."
+        )
 
 
-async def recent_activity_command(
+async def recentactivity(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-):
-    if not update.effective_user or not update.message:
+) -> None:
+    if not await _authorized(update):
         return
 
-    allowed, message = await require_permission(
-        update.effective_user.id, "view_reports"
-    )
-    if not allowed:
-        await update.message.reply_text(message)
-        return
+    message = update.effective_message
 
-    pool = await get_pool()
+    try:
+        pool = await get_pool()
 
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT actor_id, action, details, created_at
-            FROM activity_logs
-            ORDER BY created_at DESC
-            LIMIT 20
-            """
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT actor_id, action, details, created_at
+                FROM activity_logs
+                ORDER BY created_at DESC
+                LIMIT 20
+                """
+            )
+
+        if not rows:
+            await message.reply_text("Abhi koi activity log nahi hai.")
+            return
+
+        lines = ["Recent activity (latest 20):"]
+
+        for row in rows:
+            timestamp = row["created_at"].strftime("%Y-%m-%d %H:%M UTC")
+            lines.append(
+                f"\nTime: {timestamp}"
+                f"\nAdmin ID: {row['actor_id']}"
+                f"\nAction: {row['action']}"
+                f"\nDetails: {row['details']}"
+            )
+
+        await message.reply_text("\n".join(lines))
+
+    except Exception:
+        logger.exception("Failed to load recent activity")
+        await message.reply_text(
+            "Recent activity load nahi ho saki."
         )
-
-    if not rows:
-        await update.message.reply_text(
-            "Abhi activity logs available nahi hain."
-        )
-        return
-
-    lines = ["🧾 Recent Activity (latest 20):", ""]
-
-    for row in rows:
-        lines.append(
-            f"Action: {row['action']}\n"
-            f"Admin ID: {row['actor_id']}\n"
-            f"Time: {row['created_at']}\n"
-        )
-
-    await update.message.reply_text("\n".join(lines))
 
 
 def get_report_handlers():
     return [
-        CommandHandler("report", report_command),
-        CommandHandler("recentactivity", recent_activity_command),
+        CommandHandler("report", report),
+        CommandHandler("recentactivity", recentactivity),
     ]
