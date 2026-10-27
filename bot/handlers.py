@@ -9,9 +9,10 @@ KeyboardButton,
 Message,
 ReplyKeyboardMarkup,
 )
+
 from config import OWNER_ID
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(**name**)
 router = Router()
 
 MAIN_MENU_BUTTONS = [
@@ -174,7 +175,9 @@ await message.answer(
 reply_markup=get_reaction_menu(),
 )
 
-@router.message(F.text.in_({"🏠 Back to Main Menu", "⬅️ Back to Main Menu"}))
+@router.message(
+F.text.in_({"🏠 Back to Main Menu", "⬅️ Back to Main Menu"})
+)
 async def back_to_main_menu_handler(message: Message) -> None:
 await message.answer(
 "🏠 Main Menu\n\nChoose an option:",
