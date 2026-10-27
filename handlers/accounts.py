@@ -1,9 +1,6 @@
 
 from telegram import Update
-from telegram.ext import (
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import CommandHandler, ContextTypes
 
 from database import get_pool
 from utils.permissions import require_permission
@@ -14,7 +11,6 @@ async def add_account(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Register an account record without collecting login secrets."""
     user = update.effective_user
     message = update.effective_message
 
@@ -59,19 +55,16 @@ async def add_account(
     await log_action(
         user.id,
         "account_record_added",
-        {
-            "account_id": account_id,
-            "label": label,
-        },
+        {"account_id": account_id, "label": label},
     )
 
     await message.reply_text(
-        f"✅ Account record created.\n"
+        "✅ Account record created.\n\n"
         f"Record ID: {account_id}\n"
         f"Label: {label}\n"
         "Status: pending\n\n"
-        "Note: Yeh sirf database record hai. "
-        "Isse Telegram account login ya authorize nahi hua hai."
+        "Important: Yeh database record hai. Isse Telegram account "
+        "login, join ya authorize nahi hua hai."
     )
 
 
@@ -79,7 +72,6 @@ async def list_accounts(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """List registered account records without showing session data."""
     user = update.effective_user
     message = update.effective_message
 
@@ -111,11 +103,12 @@ async def list_accounts(
         )
         return
 
-    lines = ["📱 Account Records"]
+    lines = ["📱 Account Records — Latest 50"]
 
     for account in accounts:
-        created = account["created_at"].strftime("%Y-%m-%d %H:%M UTC")
-
+        created = account["created_at"].strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
         lines.append(
             f"\nRecord ID: {account['id']}\n"
             f"Label: {account['label']}\n"
@@ -130,7 +123,6 @@ async def deactivate_account(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Mark an account record inactive."""
     user = update.effective_user
     message = update.effective_message
 
@@ -154,16 +146,17 @@ async def deactivate_account(
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        result = await conn.execute(
+        row = await conn.fetchrow(
             """
             UPDATE accounts
             SET status = 'inactive'
             WHERE id = $1 AND status <> 'inactive'
+            RETURNING id, label
             """,
             account_id,
         )
 
-    if result.endswith("0"):
+    if row is None:
         await message.reply_text(
             "Account record nahi mila, ya pehle se inactive hai."
         )
@@ -176,12 +169,15 @@ async def deactivate_account(
     )
 
     await message.reply_text(
-        f"✅ Account record {account_id} inactive mark kar diya."
+        "✅ Account record inactive mark kar diya.\n"
+        f"Record ID: {row['id']}\n"
+        f"Label: {row['label']}\n\n"
+        "Note: Isse database record inactive hua hai; kisi "
+        "Telegram session ko disconnect nahi kiya gaya."
     )
 
 
 def get_account_handlers():
-    """Return account-management command handlers."""
     return [
         CommandHandler("addaccount", add_account),
         CommandHandler("accounts", list_accounts),
