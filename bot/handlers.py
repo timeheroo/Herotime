@@ -12,7 +12,7 @@ ReplyKeyboardMarkup,
 
 from config import OWNER_ID
 
-logger = logging.getLogger(**name**)
+logger = logging.getLogger(__name__)
 router = Router()
 
 MAIN_MENU_BUTTONS = [
