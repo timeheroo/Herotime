@@ -1,4 +1,3 @@
-
 """Telegram bot handlers and main menu."""
 
 import logging
