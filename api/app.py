@@ -4,26 +4,40 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
 
-from api.routes import admin, accounts, channels, monitoring, reactions, reports
-from database.connection import close_database, init_database
+from api.routes import account, admin, channel, monitoring, reaction, report
+from database.connection import (
+    close_database,
+    create_tables,
+    engine,
+    init_database,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize and close shared database resources."""
-    logger.info("Initializing database connection...")
-    await init_database()
-
+    """Initialize shared database resources."""
     try:
+        logger.info("Checking PostgreSQL connection...")
+        await init_database()
+
+        logger.info("Ensuring database tables exist...")
+        await create_tables()
+
+        logger.info("FastAPI application started.")
         yield
     finally:
         await close_database()
-        logger.info("Database connection closed.")
+        logger.info("FastAPI database resources closed.")
 
 
 app = FastAPI(
@@ -33,17 +47,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(channels.router, prefix="/api")
-app.include_router(accounts.router, prefix="/api")
-app.include_router(reactions.router, prefix="/api")
-app.include_router(reports.router, prefix="/api")
+
+app.include_router(channel.router, prefix="/api")
+app.include_router(account.router, prefix="/api")
+app.include_router(reaction.router, prefix="/api")
+app.include_router(report.router, prefix="/api")
 app.include_router(monitoring.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
 
 @app.get("/")
 async def root():
-    """Basic service information."""
     return {
         "service": "Telegram Management API",
         "status": "running",
@@ -52,13 +66,16 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Check whether PostgreSQL is reachable."""
-    from database.connection import get_session_factory
-
-    session_factory = get_session_factory()
-
-    async with session_factory() as session:
-        await session.execute(text("SELECT 1"))
+    """Check API and PostgreSQL connectivity."""
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    except Exception:
+        logger.exception("Health check failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable",
+        )
 
     return {
         "status": "healthy",
