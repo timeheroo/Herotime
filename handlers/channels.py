@@ -1,24 +1,75 @@
 
+import logging
+from urllib.parse import urlparse
+
 from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes
+from telegram.ext import (
+    CommandHandler,
+    ContextTypes,
+)
 
 from database import get_pool
 from utils.permissions import require_permission
 from utils.logger import log_action
 
+logger = logging.getLogger(__name__)
 
-async def add_channel(
+
+def normalize_channel_input(value: str) -> str:
+    """Accept @username, username, or a public t.me URL."""
+    value = value.strip()
+
+    if value.startswith("@"):
+        value = value[1:]
+
+    elif "://" in value:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower()
+
+        if host not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
+            raise ValueError(
+                "Telegram link use karein, jaise https://t.me/example"
+            )
+
+        parts = [part for part in parsed.path.split("/") if part]
+
+        if not parts:
+            raise ValueError("Telegram link mein username nahi mila.")
+
+        # Private invite links cannot be resolved like public usernames.
+        if parts[0].startswith("+") or parts[0] == "joinchat":
+            raise ValueError(
+                "Private invite link se channel automatically resolve nahi "
+                "ho sakta. Bot ko channel/group mein add karke public "
+                "username ya supported chat reference use karein."
+            )
+
+        value = parts[0]
+
+    if not value or not value.replace("_", "").isalnum():
+        raise ValueError("Valid public Telegram username enter karein.")
+
+    return value
+
+
+async def resolve_chat(context: ContextTypes.DEFAULT_TYPE, value: str):
+    username = normalize_channel_input(value)
+    return await context.bot.get_chat(f"@{username}")
+
+
+async def addchannel(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    user = update.effective_user
     message = update.effective_message
+    user = update.effective_user
 
-    if user is None or message is None:
+    if message is None or user is None:
         return
 
     allowed, reason = await require_permission(
-        user.id, "manage_channels"
+        user.id,
+        "manage_channels",
     )
     if not allowed:
         await message.reply_text(reason)
@@ -26,130 +77,97 @@ async def add_channel(
 
     if len(context.args) != 1:
         await message.reply_text(
-            "Usage: /addchannel @username\n"
-            "Example: /addchannel @mychannel"
+            "Usage:\n"
+            "/addchannel @username\n"
+            "or\n"
+            "/addchannel https://t.me/username"
         )
         return
 
-    username = context.args[0].strip().lstrip("@")
-    if not username or not username.replace("_", "").isalnum():
-        await message.reply_text("Valid public channel username dein.")
-        return
-
-    # Verify that Telegram can resolve this public channel.
     try:
-        chat = await context.bot.get_chat(f"@{username}")
-    except Exception:
-        await message.reply_text(
-            "Channel nahi mila. Username check karein aur ensure karein "
-            "ki channel public hai."
+        chat = await resolve_chat(context, context.args[0])
+
+        if chat.type not in ("channel", "group", "supergroup"):
+            await message.reply_text(
+                "Yeh Telegram channel ya group nahi lagta."
+            )
+            return
+
+        username = chat.username
+        link = (
+            f"https://t.me/{username}"
+            if username
+            else None
         )
-        return
 
-    if chat.type != "channel":
-        await message.reply_text(
-            "Yeh Telegram channel nahi lagta. Channel ka public username dein."
-        )
-        return
+        pool = await get_pool()
 
-    channel_username = chat.username or username
-    channel_link = (
-        f"https://t.me/{chat.username}"
-        if chat.username
-        else None
-    )
-
-    pool = await get_pool()
-
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            existing = await conn.fetchrow(
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
                 """
-                SELECT id, is_active
-                FROM channels
-                WHERE telegram_id = $1
-                   OR LOWER(username) = LOWER($2)
-                ORDER BY id
-                LIMIT 1
+                INSERT INTO channels
+                    (telegram_id, username, title, channel_link,
+                     is_active, created_by, updated_at)
+                VALUES ($1, $2, $3, $4, TRUE, $5, NOW())
+                ON CONFLICT (telegram_id)
+                DO UPDATE SET
+                    username = EXCLUDED.username,
+                    title = EXCLUDED.title,
+                    channel_link = EXCLUDED.channel_link,
+                    is_active = TRUE,
+                    updated_at = NOW()
+                RETURNING id, title, username
                 """,
                 chat.id,
-                channel_username,
+                username,
+                chat.title or "",
+                link,
+                user.id,
             )
 
-            if existing:
-                channel_id = existing["id"]
-                await conn.execute(
-                    """
-                    UPDATE channels
-                    SET telegram_id = $1,
-                        username = $2,
-                        title = $3,
-                        channel_link = $4,
-                        updated_at = NOW()
-                    WHERE id = $5
-                    """,
-                    chat.id,
-                    channel_username,
-                    chat.title,
-                    channel_link,
-                    channel_id,
-                )
-                status = (
-                    "active" if existing["is_active"] else "inactive"
-                )
-                action = "channel_record_updated"
-            else:
-                channel_id = await conn.fetchval(
-                    """
-                    INSERT INTO channels (
-                        telegram_id, username, title,
-                        channel_link, created_by, is_active
-                    )
-                    VALUES ($1, $2, $3, $4, $5, TRUE)
-                    RETURNING id
-                    """,
-                    chat.id,
-                    channel_username,
-                    chat.title,
-                    channel_link,
-                    user.id,
-                )
-                status = "active"
-                action = "channel_record_added"
+        await log_action(
+            user.id,
+            "channel_added_or_updated",
+            {
+                "channel_id": row["id"],
+                "telegram_id": chat.id,
+                "username": username,
+            },
+        )
 
-    await log_action(
-        user.id,
-        action,
-        {
-            "channel_id": channel_id,
-            "telegram_id": chat.id,
-            "username": channel_username,
-        },
-    )
+        identifier = f"@{username}" if username else str(chat.id)
 
-    await message.reply_text(
-        "✅ Channel record ready\n\n"
-        f"Record ID: {channel_id}\n"
-        f"Title: {chat.title or 'Not available'}\n"
-        f"Username: @{channel_username}\n"
-        f"Status: {status}\n\n"
-        "Note: Record add hone ka matlab yeh nahi ki bot ko "
-        "channel mein admin permissions mil gayi hain."
-    )
+        await message.reply_text(
+            "Channel/group saved successfully.\n"
+            f"Database ID: {row['id']}\n"
+            f"Name: {row['title']}\n"
+            f"Username/reference: {identifier}\n"
+            "Status: Active"
+        )
+
+    except ValueError as exc:
+        await message.reply_text(str(exc))
+    except Exception:
+        logger.exception("Failed to add Telegram channel/group")
+        await message.reply_text(
+            "Channel/group resolve nahi hua. Check karein ki username "
+            "sahi hai aur bot ko required access mila hua hai."
+        )
 
 
-async def list_channels(
+async def channels(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    user = update.effective_user
     message = update.effective_message
+    user = update.effective_user
 
-    if user is None or message is None:
+    if message is None or user is None:
         return
 
     allowed, reason = await require_permission(
-        user.id, "manage_channels"
+        user.id,
+        "manage_channels",
     )
     if not allowed:
         await message.reply_text(reason)
@@ -158,64 +176,71 @@ async def list_channels(
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        channels = await conn.fetch(
+        rows = await conn.fetch(
             """
             SELECT id, telegram_id, username, title,
-                   is_active, created_at
+                   channel_link, is_active
             FROM channels
             ORDER BY id DESC
-            LIMIT 50
             """
         )
 
-    if not channels:
-        await message.reply_text("Abhi koi channel record nahi hai.")
+    if not rows:
+        await message.reply_text("Abhi koi channel/group saved nahi hai.")
         return
 
-    lines = ["📢 Channel Records (latest 50)"]
+    lines = ["Registered channels/groups:"]
 
-    for channel in channels:
-        status = "🟢 Active" if channel["is_active"] else "🔴 Inactive"
-        username = (
-            f"@{channel['username']}"
-            if channel["username"]
-            else "Not available"
+    for row in rows:
+        status = "ACTIVE" if row["is_active"] else "INACTIVE"
+        identifier = (
+            f"@{row['username']}"
+            if row["username"]
+            else str(row["telegram_id"])
         )
         lines.append(
-            f"\nRecord ID: {channel['id']}\n"
-            f"Title: {channel['title'] or 'Not available'}\n"
-            f"Username: {username}\n"
-            f"Telegram ID: {channel['telegram_id'] or 'Not verified'}\n"
-            f"Status: {status}"
+            f"\nID: {row['id']}"
+            f"\nName: {row['title']}"
+            f"\nUsername/reference: {identifier}"
+            f"\nStatus: {status}"
         )
 
     await message.reply_text("\n".join(lines))
 
 
-async def set_channel_status(
+async def _set_channel_status(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     active: bool,
 ) -> None:
-    user = update.effective_user
     message = update.effective_message
+    user = update.effective_user
 
-    if user is None or message is None:
+    if message is None or user is None:
         return
 
     allowed, reason = await require_permission(
-        user.id, "manage_channels"
+        user.id,
+        "manage_channels",
     )
     if not allowed:
         await message.reply_text(reason)
         return
 
-    if len(context.args) != 1 or not context.args[0].isdigit():
-        command = "activatechannel" if active else "deactivatechannel"
-        await message.reply_text(f"Usage: /{command} CHANNEL_RECORD_ID")
+    if len(context.args) != 1:
+        await message.reply_text(
+            "Usage:\n"
+            "/activatechannel @username\n"
+            "/deactivatechannel @username"
+        )
         return
 
-    channel_id = int(context.args[0])
+    try:
+        username = normalize_channel_input(context.args[0])
+    except ValueError as exc:
+        await message.reply_text(str(exc))
+        return
+
     pool = await get_pool()
 
     async with pool.acquire() as conn:
@@ -223,55 +248,49 @@ async def set_channel_status(
             """
             UPDATE channels
             SET is_active = $1, updated_at = NOW()
-            WHERE id = $2
-            RETURNING id, username, title, is_active
+            WHERE LOWER(username) = LOWER($2)
+            RETURNING id, title, is_active
             """,
             active,
-            channel_id,
+            username,
         )
 
     if row is None:
         await message.reply_text(
-            "Channel record nahi mila. /channels se Record ID check karein."
+            "Channel/group database mein nahi mila. Pehle /addchannel karein."
         )
         return
 
-    action = "channel_activated" if active else "channel_deactivated"
     await log_action(
         user.id,
-        action,
-        {"channel_id": channel_id},
+        "channel_activated" if active else "channel_deactivated",
+        {"channel_id": row["id"], "username": username},
     )
 
-    status = "🟢 Active" if active else "🔴 Inactive"
+    status = "ACTIVE" if active else "INACTIVE"
     await message.reply_text(
-        f"✅ Channel record update ho gaya.\n"
-        f"Record ID: {row['id']}\n"
-        f"Title: {row['title'] or 'Not available'}\n"
-        f"Status: {status}\n\n"
-        "Note: Yeh database status hai; isse Telegram permissions "
-        "automatically change nahi hoti."
+        f"{row['title']} ka status: {status}"
     )
 
 
-async def activate_channel(
+async def activatechannel(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await set_channel_status(update, context, True)
+    await _set_channel_status(update, context, True)
 
 
-async def deactivate_channel(
+async def deactivatechannel(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    await set_channel_status(update, context, False)
+    await _set_channel_status(update, context, False)
 
 
 def get_channel_handlers():
     return [
-        CommandHandler("addchannel", add_channel),
-        CommandHandler("channels", list_channels),
-        CommandHandler("activatechannel", activate_channel),
-        CommandHandler("deactivatechannel", deactivate_channel),
+        CommandHandler("addchannel", addchannel),
+        CommandHandler("channels", channels),
+        CommandHandler("activatechannel", activatechannel),
+        CommandHandler("deactivatechannel", deactivatechannel),
     ]
