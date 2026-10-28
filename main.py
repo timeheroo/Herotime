@@ -15,6 +15,7 @@ from database.connection import (
     init_database,
 )
 from bot.handlers import register_handlers
+from bot.commands import router as commands_router
 
 
 logging.basicConfig(
@@ -44,6 +45,7 @@ async def main() -> None:
 
         logger.info("Registering Telegram bot handlers...")
         register_handlers(dispatcher)
+        dispatcher.include_router(commands_router)
 
         logger.info("Starting Telegram bot polling...")
         await dispatcher.start_polling(bot)
