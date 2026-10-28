@@ -43,7 +43,7 @@ async def main() -> None:
         await create_tables()
 
         logger.info("Registering Telegram bot handlers...")
-        await register_handlers(dispatcher)
+        register_handlers(dispatcher)
 
         logger.info("Starting Telegram bot polling...")
         await dispatcher.start_polling(bot)
