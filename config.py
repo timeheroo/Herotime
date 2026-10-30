@@ -17,20 +17,30 @@ class Settings(BaseSettings):
     DATABASE_URL: str = Field(min_length=1)
     OWNER_ID: int = Field(gt=0)
 
+    @field_validator("BOT_TOKEN")
+    @classmethod
+    def validate_bot_token(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("BOT_TOKEN cannot be empty")
+        return value
+
     @field_validator("DATABASE_URL")
     @classmethod
     def normalize_database_url(cls, value: str) -> str:
         value = value.strip()
 
+        if not value:
+            raise ValueError("DATABASE_URL cannot be empty")
+
         if value.startswith("postgres://"):
-            return value.replace(
+            value = value.replace(
                 "postgres://",
                 "postgresql+asyncpg://",
                 1,
             )
-
-        if value.startswith("postgresql://"):
-            return value.replace(
+        elif value.startswith("postgresql://"):
+            value = value.replace(
                 "postgresql://",
                 "postgresql+asyncpg://",
                 1,
