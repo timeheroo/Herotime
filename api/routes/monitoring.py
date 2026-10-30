@@ -4,14 +4,26 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    status,
+)
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from api.dependencies import DatabaseSession, require_permission
 from database.models import Channel, MonitoringSession, User
 
-router = APIRouter(prefix="/monitoring", tags=["Monitoring"])
+
+router = APIRouter(
+    prefix="/monitoring",
+    tags=["Monitoring"],
+)
+
 
 MonitoringManager = Annotated[
     User,
@@ -23,6 +35,15 @@ class SessionCreate(BaseModel):
     channel_id: int = Field(gt=0)
     configured_target: int | None = Field(default=None, ge=0)
     notes: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("notes")
+    @classmethod
+    def normalize_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        value = value.strip()
+        return value or None
 
 
 class SessionResponse(BaseModel):
@@ -46,19 +67,23 @@ async def create_session(
     payload: SessionCreate,
     _user: MonitoringManager,
     session: DatabaseSession,
-):
+) -> MonitoringSession:
     """Create a stopped monitoring session."""
-    channel = await session.get(Channel, payload.channel_id)
+
+    channel = await session.get(
+        Channel,
+        payload.channel_id,
+    )
 
     if channel is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Channel not found.",
         )
 
     if not channel.is_active:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="The channel must be active.",
         )
 
@@ -70,33 +95,35 @@ async def create_session(
     )
 
     session.add(item)
+
     await session.commit()
     await session.refresh(item)
+
     return item
 
 
-@router.get("/sessions", response_model=list[SessionResponse])
+@router.get(
+    "/sessions",
+    response_model=list[SessionResponse],
+)
 async def list_sessions(
     _user: MonitoringManager,
-    channel_id: int | None = None,
-    session: DatabaseSession = None,
-):
+    session: DatabaseSession,
+    channel_id: Annotated[int | None, Query(gt=0)] = None,
+) -> list[MonitoringSession]:
     """List monitoring sessions."""
+
     statement = select(MonitoringSession).order_by(
         MonitoringSession.id.desc()
     )
 
     if channel_id is not None:
-        if channel_id <= 0:
-            raise HTTPException(
-                status_code=422,
-                detail="channel_id must be positive.",
-            )
         statement = statement.where(
             MonitoringSession.channel_id == channel_id
         )
 
     result = await session.execute(statement)
+
     return list(result.scalars().all())
 
 
@@ -105,31 +132,38 @@ async def list_sessions(
     response_model=SessionResponse,
 )
 async def start_session(
-    session_id: int,
+    session_id: Annotated[int, Path(ge=1)],
     _user: MonitoringManager,
     session: DatabaseSession,
-):
+) -> MonitoringSession:
     """Mark a monitoring session as running."""
-    item = await session.get(MonitoringSession, session_id)
+
+    item = await session.get(
+        MonitoringSession,
+        session_id,
+    )
 
     if item is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found.",
-        )
-
-    channel = await session.get(Channel, item.channel_id)
-
-    if channel is None or not channel.is_active:
-        raise HTTPException(
-            status_code=400,
-            detail="The channel must exist and be active.",
         )
 
     if item.status == "running":
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Session is already running.",
+        )
+
+    channel = await session.get(
+        Channel,
+        item.channel_id,
+    )
+
+    if channel is None or not channel.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The channel must exist and be active.",
         )
 
     item.status = "running"
@@ -138,6 +172,7 @@ async def start_session(
 
     await session.commit()
     await session.refresh(item)
+
     return item
 
 
@@ -146,22 +181,26 @@ async def start_session(
     response_model=SessionResponse,
 )
 async def stop_session(
-    session_id: int,
+    session_id: Annotated[int, Path(ge=1)],
     _user: MonitoringManager,
     session: DatabaseSession,
-):
+) -> MonitoringSession:
     """Mark a monitoring session as stopped."""
-    item = await session.get(MonitoringSession, session_id)
+
+    item = await session.get(
+        MonitoringSession,
+        session_id,
+    )
 
     if item is None:
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="Session not found.",
         )
 
     if item.status != "running":
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Session is not running.",
         )
 
@@ -170,4 +209,5 @@ async def stop_session(
 
     await session.commit()
     await session.refresh(item)
+
     return item
