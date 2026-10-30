@@ -3,19 +3,24 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from api.dependencies import DatabaseSession, require_permission
 from database.models import Channel, User
 
-router = APIRouter(prefix="/channels", tags=["Channels"])
+
+router = APIRouter(
+    prefix="/channels",
+    tags=["Channels"],
+)
+
 
 ChannelManager = Annotated[
     User,
-    __import__("fastapi").Depends(require_permission("channel_management")),
+    Depends(require_permission("channel_management")),
 ]
 
 
@@ -27,6 +32,39 @@ class ChannelCreate(BaseModel):
         default="channel",
         pattern=r"^(channel|group|supergroup)$",
     )
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        value = value.strip()
+
+        if not value:
+            raise ValueError("Channel title cannot be empty.")
+
+        return value
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        value = value.strip().lstrip("@")
+
+        if not value:
+            return None
+
+        return value.lower()
+
+    @field_validator("chat_link")
+    @classmethod
+    def normalize_chat_link(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        value = value.strip()
+
+        return value or None
 
 
 class ChannelResponse(BaseModel):
@@ -47,69 +85,76 @@ class ChannelResponse(BaseModel):
 )
 async def add_channel(
     payload: ChannelCreate,
-    _user: ChannelManager,
+    user: ChannelManager,
     session: DatabaseSession,
-):
-    """Register channel details in the database."""
-    username = (
-        payload.username.strip().lstrip("@")
-        if payload.username
-        else None
-    )
-    link = payload.chat_link.strip() if payload.chat_link else None
-    title = payload.title.strip()
+) -> Channel:
+    """Register channel metadata in the database."""
 
-    if not title:
-        raise HTTPException(
-            status_code=422,
-            detail="Title cannot be empty.",
-        )
+    title = payload.title
+    username = payload.username
+    chat_link = payload.chat_link
 
     if username:
         result = await session.execute(
-            select(Channel).where(Channel.username == username)
+            select(Channel.id).where(
+                func.lower(Channel.username) == username
+            )
         )
-        if result.scalar_one_or_none():
+
+        if result.scalar_one_or_none() is not None:
             raise HTTPException(
-                status_code=409,
+                status_code=status.HTTP_409_CONFLICT,
                 detail="A channel with this username is already registered.",
             )
 
     channel = Channel(
         title=title,
         username=username,
-        chat_link=link,
+        chat_link=chat_link,
         chat_type=payload.chat_type,
         is_active=True,
+        created_by_user_id=user.id,
     )
+
     session.add(channel)
 
     try:
         await session.commit()
         await session.refresh(channel)
+
     except IntegrityError as exc:
         await session.rollback()
+
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Channel conflicts with an existing database record.",
         ) from exc
 
     return channel
 
 
-@router.get("", response_model=list[ChannelResponse])
+@router.get(
+    "",
+    response_model=list[ChannelResponse],
+)
 async def list_channels(
     _user: ChannelManager,
+    session: DatabaseSession,
     active_only: bool = Query(default=False),
-    session: DatabaseSession = None,
-):
+) -> list[Channel]:
     """List registered channels."""
-    statement = select(Channel).order_by(Channel.id.desc())
+
+    statement = select(Channel).order_by(
+        Channel.id.desc()
+    )
 
     if active_only:
-        statement = statement.where(Channel.is_active.is_(True))
+        statement = statement.where(
+            Channel.is_active.is_(True)
+        )
 
     result = await session.execute(statement)
+
     return list(result.scalars().all())
 
 
@@ -118,19 +163,28 @@ async def list_channels(
     response_model=ChannelResponse,
 )
 async def deactivate_channel(
-    channel_id: int,
+    channel_id: Annotated[int, Path(ge=1)],
     _user: ChannelManager,
     session: DatabaseSession,
-):
+) -> Channel:
     """Deactivate a registered channel."""
-    channel = await session.get(Channel, channel_id)
+
+    channel = await session.get(
+        Channel,
+        channel_id,
+    )
 
     if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Channel not found.",
+        )
 
     channel.is_active = False
+
     await session.commit()
     await session.refresh(channel)
+
     return channel
 
 
@@ -139,17 +193,26 @@ async def deactivate_channel(
     response_model=ChannelResponse,
 )
 async def reactivate_channel(
-    channel_id: int,
+    channel_id: Annotated[int, Path(ge=1)],
     _user: ChannelManager,
     session: DatabaseSession,
-):
+) -> Channel:
     """Reactivate a registered channel."""
-    channel = await session.get(Channel, channel_id)
+
+    channel = await session.get(
+        Channel,
+        channel_id,
+    )
 
     if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Channel not found.",
+        )
 
     channel.is_active = True
+
     await session.commit()
     await session.refresh(channel)
+
     return channel
