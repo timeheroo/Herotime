@@ -7,7 +7,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
 
-from api.routes import account, admin, channel, monitoring, reaction, report
+from api.routers import (
+    account,
+    admin,
+    channels,
+    monitoring,
+    reactions,
+    reports,
+)
 from database.connection import (
     close_database,
     create_tables,
@@ -25,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize shared database resources."""
+    """Initialize and close shared database resources."""
     try:
         logger.info("Checking PostgreSQL connection...")
         await init_database()
@@ -35,6 +42,7 @@ async def lifespan(app: FastAPI):
 
         logger.info("FastAPI application started.")
         yield
+
     finally:
         await close_database()
         logger.info("FastAPI database resources closed.")
@@ -48,10 +56,11 @@ app = FastAPI(
 )
 
 
-app.include_router(channel.router, prefix="/api")
+# Register API routers
+app.include_router(channels.router, prefix="/api")
 app.include_router(account.router, prefix="/api")
-app.include_router(reaction.router, prefix="/api")
-app.include_router(report.router, prefix="/api")
+app.include_router(reactions.router, prefix="/api")
+app.include_router(reports.router, prefix="/api")
 app.include_router(monitoring.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
@@ -70,6 +79,7 @@ async def health():
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
+
     except Exception:
         logger.exception("Health check failed.")
         raise HTTPException(
